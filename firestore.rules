@@ -1,0 +1,120 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ─── Helpers ───────────────────────────────────────────────────────────────
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+    // Keys that change between the existing doc and the incoming write.
+    function changedKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    // ─── Users ─────────────────────────────────────────────────────────────────
+    // wins / losses are SERVER-ONLY: they are written exclusively by the
+    // `finalizeBattle` Cloud Function (Admin SDK), which bypasses these rules.
+    // No client may ever modify another user's doc, and no client (not even the
+    // owner) may touch wins / losses / posts directly.
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create: if isOwner(userId);
+      allow update: if isOwner(userId)
+        && !changedKeys().hasAny(['wins', 'losses', 'posts']);
+      // No client deletes.
+    }
+
+    // ─── Posts ─────────────────────────────────────────────────────────────────
+    match /posts/{postId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid;
+      allow update: if isSignedIn()
+        && (
+          // Owner can update caption/battleEnabled
+          resource.data.userId == request.auth.uid
+          // Anyone can increment likesCount (handled via transaction)
+          || changedKeys().hasOnly(['likesCount'])
+        );
+      allow delete: if isOwner(resource.data.userId);
+    }
+
+    // ─── Likes ─────────────────────────────────────────────────────────────────
+    match /likes/{likeId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid
+        && likeId == (request.resource.data.postId + '_' + request.auth.uid);
+      allow delete: if isOwner(resource.data.userId);
+    }
+
+    // ─── Battles ───────────────────────────────────────────────────────────────
+    // status="completed", winner, and statsRecorded are SERVER-ONLY. They are
+    // written only by the `finalizeBattle` Cloud Function (Admin SDK). Clients
+    // may ONLY:
+    //   1. Create a battle they own.
+    //   2. Accept an open challenge (set playerB and flip status open → live).
+    //   3. Cast a vote (increment votesA / votesB on a non-completed battle).
+    match /battles/{battleId} {
+      allow read: if isSignedIn();
+
+      allow create: if isSignedIn()
+        && request.resource.data.creatorId == request.auth.uid;
+
+      // Accept an open challenge: only playerB + status may change, and the
+      // battle must move from "open" to "live". Cannot set winner/statsRecorded.
+      // The accepter must set THEMSELVES as playerB, and the original creator
+      // may never accept their own challenge (no self-battles / double accepts).
+      function isAcceptingChallenge() {
+        return resource.data.status == 'open'
+          && request.resource.data.status == 'live'
+          && changedKeys().hasOnly(['playerB', 'status'])
+          && request.resource.data.playerB.userId == request.auth.uid
+          && resource.data.creatorId != request.auth.uid;
+      }
+
+      // Cast a vote: only the vote counters may change, and the battle must not
+      // already be completed. Cannot touch winner/status/statsRecorded.
+      function isVoteCounterUpdate() {
+        return resource.data.status != 'completed'
+          && changedKeys().hasOnly(['votesA', 'votesB']);
+      }
+
+      allow update: if isSignedIn()
+        && (isAcceptingChallenge() || isVoteCounterUpdate());
+
+      // No client deletes; no client may set winner/statsRecorded/completed.
+    }
+
+    // ─── Votes ─────────────────────────────────────────────────────────────────
+    // A vote may only be created by the authenticated user acting as themselves.
+    // The doc ID convention ({battleId}_{uid}) guarantees one vote per user per
+    // battle. Votes are immutable (no update / delete).
+    match /votes/{voteId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid
+        && voteId == (request.resource.data.battleId + '_' + request.auth.uid)
+        && request.resource.data.side in ['A', 'B'];
+    }
+
+    // ─── Follows ───────────────────────────────────────────────────────────────
+    // Doc ID convention: {followerId}_{followingId}
+    // Fields: followerId, followingId, createdAt
+    match /follows/{followId} {
+      // Any signed-in user can read follows (public social graph)
+      allow read: if isSignedIn();
+      // A user can only create a follow doc where they are the follower,
+      // and the doc ID must match the {followerId}_{followingId} pattern.
+      allow create: if isSignedIn()
+        && request.resource.data.followerId == request.auth.uid
+        && followId == (request.auth.uid + '_' + request.resource.data.followingId);
+      // A user can only delete their own follow docs
+      allow delete: if isSignedIn()
+        && resource.data.followerId == request.auth.uid;
+    }
+  }
+}
