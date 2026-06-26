@@ -250,7 +250,7 @@ export default function BattleDetailModal({
     }
   }
 
-  console.log("[battleDetail] opened —", {
+  __DEV__ && console.log("[battleDetail] opened —", {
     battleId: battle.id,
     status,
     category: battle.category,

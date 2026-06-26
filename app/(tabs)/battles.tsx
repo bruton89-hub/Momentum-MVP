@@ -16,8 +16,6 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
 import { useRouter } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
-import { getDocs, query, collection, where } from "firebase/firestore";
-import { db } from "@/config/firebase";
 import { useAuthStore } from "@/store/authStore";
 import {
   useBattles,
@@ -28,6 +26,7 @@ import {
   getNextVotableBattle,
 } from "@/hooks/useBattles";
 import { uploadMedia, createPost } from "@/hooks/usePosts";
+import { fetchPostsByUser } from "@/services/postRepository";
 import { COLORS, SPACING, FONTS, RADIUS } from "@/constants/theme";
 import { openAthleteProfile } from "@/utils/navigation";
 import BattleCard from "@/components/BattleCard";
@@ -128,32 +127,8 @@ function AcceptModal({
     // with renderable media can be used to accept a challenge (and they can also
     // upload brand-new media below). `orderBy` is omitted to avoid requiring a
     // composite index; we sort the merged results newest-first client-side.
-    Promise.all([
-      getDocs(query(collection(db, "posts"), where("userId",   "==", userId))),
-      getDocs(query(collection(db, "posts"), where("authorId", "==", userId))),
-      getDocs(query(collection(db, "posts"), where("uid",      "==", userId))),
-    ])
-      .then(([byUserId, byAuthorId, byUid]) => {
-        const seen = new Set<string>();
-        const merged: Post[] = [];
-        for (const snap of [byUserId, byAuthorId, byUid]) {
-          for (const d of snap.docs) {
-            if (!seen.has(d.id)) {
-              seen.add(d.id);
-              merged.push({ id: d.id, ...(d.data() as Omit<Post, "id">) });
-            }
-          }
-        }
-        // Keep only posts that have renderable media
-        const withMedia = merged.filter((p) => !!p.mediaUrl);
-        // Sort newest-first client-side
-        withMedia.sort((a, b) => {
-          const tsA = a.createdAt ? (typeof (a.createdAt as { toMillis?: () => number }).toMillis === "function" ? (a.createdAt as { toMillis: () => number }).toMillis() : 0) : 0;
-          const tsB = b.createdAt ? (typeof (b.createdAt as { toMillis?: () => number }).toMillis === "function" ? (b.createdAt as { toMillis: () => number }).toMillis() : 0) : 0;
-          return tsB - tsA;
-        });
-        setMyPosts(withMedia);
-      })
+    fetchPostsByUser(userId)
+      .then(setMyPosts)
       .catch((err) => {
         console.error("[acceptModal] post query failed:", err);
         setMyPosts([]);
@@ -652,7 +627,7 @@ export default function BattlesScreen() {
   const router = useRouter();
   const userId = useAuthStore((s) => s.userId);
   const profile = useAuthStore((s) => s.profile);
-  const { battles, votedMap, loading, refreshing, error, finalizeWarning, refresh, handleVote } =
+  const { battles, votedMap, loading, refreshing, error, finalizeWarning, refresh, manualRefresh, handleVote } =
     useBattles(userId);
 
   // UI shows "Live Battles", "My Battles", "Completed"
@@ -792,13 +767,13 @@ export default function BattlesScreen() {
       });
 
       if (next) {
-        console.log("[battleVote] advancing to next battle —", {
+        __DEV__ && console.log("[battleVote] advancing to next battle —", {
           battleId: next.id,
           category: next.category,
         });
         setDetailBattle(next);
       } else {
-        console.log("[battleVote] all caught up — no more votable battles");
+        __DEV__ && console.log("[battleVote] all caught up — no more votable battles");
         setDetailBattle(null);
         Alert.alert("All caught up! 🎉", "You've voted on all available live battles.");
       }
@@ -818,13 +793,13 @@ export default function BattlesScreen() {
       });
 
       if (next) {
-        console.log("[battleSkip] advancing to next battle —", {
+        __DEV__ && console.log("[battleSkip] advancing to next battle —", {
           battleId: next.id,
           category: next.category,
         });
         setDetailBattle(next);
       } else {
-        console.log("[battleSkip] no more votable battles");
+        __DEV__ && console.log("[battleSkip] no more votable battles");
         setDetailBattle(null);
         Alert.alert("All caught up! 🎉", "No more votable battles right now.");
       }
@@ -837,7 +812,7 @@ export default function BattlesScreen() {
     return (
       <SafeAreaView style={styles.safe} edges={["top"]}>
         <EmptyState icon="⚠️" title="Failed to load battles" subtitle={error}
-          actionLabel="Retry" onAction={refresh} />
+          actionLabel="Retry" onAction={manualRefresh} />
       </SafeAreaView>
     );
   }
@@ -879,7 +854,7 @@ export default function BattlesScreen() {
       <ScrollView
         showsVerticalScrollIndicator={false}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={COLORS.accent} />
+          <RefreshControl refreshing={refreshing} onRefresh={manualRefresh} tintColor={COLORS.accent} />
         }
         contentContainerStyle={filtered.length === 0 ? { flex: 1 } : { paddingBottom: SPACING.xxxl }}
       >
@@ -1020,7 +995,7 @@ const styles = StyleSheet.create({
   },
   heading: {
     color: COLORS.textPrimary,
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: FONTS.heavy,
     letterSpacing: 0.5,
   },
@@ -1063,8 +1038,9 @@ const styles = StyleSheet.create({
   },
   tabText: {
     color: COLORS.textMuted,
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: FONTS.semibold,
+    letterSpacing: 0.2,
   },
   tabTextActive: {
     color: COLORS.textPrimary,
@@ -1072,10 +1048,10 @@ const styles = StyleSheet.create({
   },
   tabUnderline: {
     width: "100%",
-    height: 2,
-    borderRadius: 2,
+    height: 3,
+    borderRadius: 3,
     backgroundColor: COLORS.transparent,
-    marginTop: SPACING.sm,
+    marginTop: SPACING.sm + 2,
   },
   tabUnderlineActive: {
     backgroundColor: COLORS.accent,

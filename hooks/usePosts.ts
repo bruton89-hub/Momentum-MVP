@@ -5,92 +5,37 @@ import {
   orderBy,
   limit,
   getDocs,
-  getDoc,
   addDoc,
-  updateDoc,
-  doc,
-  serverTimestamp,
   where,
-  runTransaction,
-  increment,
   Timestamp,
+  documentId,
 } from "firebase/firestore";
 import { ref, uploadBytesResumable, getDownloadURL } from "firebase/storage";
+import { httpsCallable } from "firebase/functions";
 import { Platform } from "react-native";
-import { db, storage } from "@/config/firebase";
+import { db, functions, storage } from "@/config/firebase";
+import {
+  fetchPostsByUser,
+  fetchPostsByUsers,
+  normalizePost,
+} from "@/services/postRepository";
 import type { Post } from "@/types";
+import type { PostVideoEdit } from "@/constants/videoEditing";
 
 const POSTS_PER_PAGE = 20;
+export const MAX_POST_MEDIA_BYTES = 50 * 1024 * 1024;
 
-// ─── Normalize raw Firestore data into a typed Post ───────────────────────────
-// Post documents may come from different app versions with missing or differently
-// typed fields. Extract every field defensively to avoid undefined/NaN at render.
-//
-// Field aliases accepted (legacy schema compatibility):
-//   userId   ← userId | authorId | uid | ownerId
-//   username ← username | displayName
-//   mediaUrl ← mediaUrl | mediaURL | photoURL
-//   userAvatar ← userAvatar | avatarUrl | avatar | photoURL
+type SetPostLikeResult = {
+  postId: string;
+  liked: boolean;
+  likesCount: number;
+  outcome: "applied" | "already_applied";
+};
 
-function str(value: unknown): string {
-  return typeof value === "string" && value.length > 0 ? value : "";
-}
-
-export function normalizePost(id: string, data: Record<string, unknown>): Post {
-  // Resolve userId from any of the known alias fields written by old app versions
-  const userId =
-    str(data.userId) ||
-    str(data.authorId) ||
-    str(data.uid) ||
-    str(data.ownerId);
-
-  // Resolve display name
-  const username =
-    str(data.username) ||
-    str(data.displayName) ||
-    "Unknown";
-
-  // Resolve media URL — some versions used camelCase mediaURL or photoURL
-  const mediaUrl =
-    str(data.mediaUrl) ||
-    str(data.mediaURL) ||
-    str(data.photoURL);
-
-  // Resolve avatar — prefer dedicated avatar field, fall back to photoURL
-  const userAvatar =
-    str(data.userAvatar) ||
-    str(data.avatarUrl) ||
-    str(data.avatar) ||
-    str(data.photoURL);
-
-  const avatarUrl =
-    str(data.avatarUrl) ||
-    str(data.userAvatar) ||
-    str(data.avatar);
-
-  // Infer mediaType from URL extension for legacy posts that stored "image"
-  // even though the URL points to an .mp4 / .mov file. VIDEO_EXT_RE matches
-  // the extension immediately before an optional query string or hash.
-  const VIDEO_EXT_RE = /\.(mp4|mov|m4v|avi|webm|mkv)(\?|#|$)/i;
-  const inferredMediaType: "video" | "image" =
-    data.mediaType === "video" || VIDEO_EXT_RE.test(mediaUrl)
-      ? "video"
-      : "image";
-
-  return {
-    id,
-    userId,
-    username,
-    userAvatar,
-    avatarUrl,
-    mediaUrl,
-    mediaType:     inferredMediaType,
-    caption:       str(data.caption),
-    likesCount:    typeof data.likesCount === "number" ? data.likesCount : 0,
-    battleEnabled: typeof data.battleEnabled === "boolean" ? data.battleEnabled : false,
-    createdAt:     (data.createdAt as Timestamp) ?? null,
-  };
-}
+const setPostLikeCallable = httpsCallable<
+  { postId: string; liked: boolean; clientMutationId: string },
+  SetPostLikeResult
+>(functions, "setPostLike");
 
 // ─── Upload media to Firebase Storage ────────────────────────────────────────
 
@@ -99,33 +44,36 @@ export async function uploadMedia(
   userId: string,
   onProgress?: (pct: number) => void
 ): Promise<string> {
-  console.log("[uploadMedia] input URI", uri);
-  console.log("[uploadMedia] platform", Platform.OS);
-  console.log("[uploadMedia] storage bucket", storage.app.options.storageBucket);
+  return (await uploadMediaWithPath(uri, userId, onProgress)).url;
+}
 
+export interface UploadedMedia {
+  url: string;
+  fullPath: string;
+}
+
+export async function uploadMediaWithPath(
+  uri: string,
+  userId: string,
+  onProgress?: (pct: number) => void,
+  filenamePrefix = "post"
+): Promise<UploadedMedia> {
   const blob = await uriToBlob(uri);
-  console.log("[uploadMedia] blob created", {
-    size: blob.size,
-    type: blob.type,
-  });
+  if (blob.size > MAX_POST_MEDIA_BYTES) {
+    throw new Error("Media must be 50 MB or smaller.");
+  }
 
   const ext = extensionFromBlob(blob) || extensionFromUri(uri) || "jpg";
-  const filename = `posts/${userId}/${Date.now()}.${ext}`;
-  console.log("[uploadMedia] Firebase Storage ref path", filename);
+  const filename = `posts/${userId}/${filenamePrefix}_${Date.now()}.${ext}`;
   const storageRef = ref(storage, filename);
 
-  return new Promise<string>((resolve, reject) => {
+  return new Promise<UploadedMedia>((resolve, reject) => {
     const task = uploadBytesResumable(storageRef, blob, {
       contentType: blob.type || (ext === "mp4" ? "video/mp4" : "image/jpeg"),
     });
     task.on(
       "state_changed",
       (snap) => {
-        console.log("[uploadMedia] uploadBytes state", {
-          state: snap.state,
-          bytesTransferred: snap.bytesTransferred,
-          totalBytes: snap.totalBytes,
-        });
         if (onProgress) {
           onProgress(Math.round((snap.bytesTransferred / snap.totalBytes) * 100));
         }
@@ -136,15 +84,9 @@ export async function uploadMedia(
       },
       async () => {
         try {
-          console.log("[uploadMedia] uploadBytes result", {
-            fullPath: task.snapshot.ref.fullPath,
-            size: task.snapshot.metadata.size,
-            contentType: task.snapshot.metadata.contentType,
-          });
           const url = await getDownloadURL(task.snapshot.ref);
-          console.log("[uploadMedia] getDownloadURL result", url);
           onProgress?.(100);
-          resolve(url);
+          resolve({ url, fullPath: task.snapshot.ref.fullPath });
         } catch (err) {
           console.error("[uploadMedia] getDownloadURL error", err);
           reject(err);
@@ -157,11 +99,6 @@ export async function uploadMedia(
 async function uriToBlob(uri: string): Promise<Blob> {
   if (Platform.OS === "web" || uri.startsWith("http") || uri.startsWith("blob:") || uri.startsWith("data:")) {
     const response = await fetch(uri);
-    console.log("[uploadMedia] fetch(uri) result", {
-      ok: response.ok,
-      status: response.status,
-      type: response.type,
-    });
     if (!response.ok) {
       throw new Error(`Media fetch failed with status ${response.status}`);
     }
@@ -171,10 +108,6 @@ async function uriToBlob(uri: string): Promise<Blob> {
   return new Promise<Blob>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.onload = () => {
-      console.log("[uploadMedia] native XHR result", {
-        status: xhr.status,
-        responseType: xhr.responseType,
-      });
       resolve(xhr.response as Blob);
     };
     xhr.onerror = () => {
@@ -201,14 +134,6 @@ function extensionFromBlob(blob: Blob): string | null {
   return subtype;
 }
 
-// ─── Timestamp helper (used by sorting in useUserPosts + useFollowingPosts) ───
-
-function getTimestampMs(ts: Post["createdAt"]): number {
-  if (!ts) return 0;
-  if (ts instanceof Timestamp) return ts.toMillis();
-  return (ts as { seconds: number }).seconds * 1000;
-}
-
 // ─── Create a post ────────────────────────────────────────────────────────────
 
 export interface CreatePostInput {
@@ -220,11 +145,20 @@ export interface CreatePostInput {
   mediaType: "image" | "video";
   caption: string;
   battleEnabled: boolean;
+  originalMediaUrl?: string;
+  videoEdit?: PostVideoEdit;
 }
 
 export async function createPost(input: CreatePostInput): Promise<string> {
+  const {
+    originalMediaUrl,
+    videoEdit,
+    ...requiredInput
+  } = input;
   const payload = {
-    ...input,
+    ...requiredInput,
+    ...(originalMediaUrl ? { originalMediaUrl } : {}),
+    ...(videoEdit ? { videoEdit } : {}),
     // Write all known userId aliases so docs are found regardless of which
     // field name old or future queries use.
     authorId: input.userId,
@@ -241,71 +175,9 @@ export async function createPost(input: CreatePostInput): Promise<string> {
     createdAt: Timestamp.now(),
     updatedAt: Timestamp.now(),
   };
-  console.log("[createPost] Firestore payload", {
-    userId: payload.userId,
-    authorId: payload.authorId,
-    uid: payload.uid,
-    username: payload.username,
-    userAvatar: payload.userAvatar,
-    avatarUrl: payload.avatarUrl,
-    mediaUrl: payload.mediaUrl,
-    mediaType: payload.mediaType,
-    caption: payload.caption,
-    likesCount: payload.likesCount,
-    battleEnabled: payload.battleEnabled,
-    createdAt: payload.createdAt.toMillis(),
-  });
   const docRef = await addDoc(collection(db, "posts"), payload);
-  console.log("[createPost] Firestore post created, docId =", docRef.id);
-
-  // Verify the doc is immediately readable (confirms write succeeded)
-  try {
-    const snap = await getDoc(docRef);
-    console.log("[createPost] post doc snapshot — exists:", snap.exists(),
-      "createdAt:", snap.data()?.createdAt ?? "null",
-      "userId:", snap.data()?.userId ?? "missing");
-  } catch (snapErr) {
-    console.warn("[createPost] post doc snapshot read failed (non-fatal):", snapErr);
-  }
-
-  // ── Non-fatal posts counter ─────────────────────────────────────────────────
-  // Firestore rules may restrict writes to users/{userId}.  If this increment
-  // fails it must NOT throw — the post document was already written and the user
-  // should NOT see "Post failed".  Counter inaccuracy is recoverable; losing the
-  // navigation to Home is not.
-  try {
-    await updateDoc(doc(db, "users", input.userId), {
-      posts: increment(1),
-    });
-    console.log("[createPost] posts counter incremented");
-  } catch (counterErr) {
-    console.warn("[createPost] posts counter increment failed (non-fatal):", counterErr);
-  }
 
   return docRef.id;
-}
-
-// ─── Toggle like (transaction-safe) ──────────────────────────────────────────
-
-export async function toggleLike(
-  postId: string,
-  userId: string
-): Promise<"liked" | "unliked"> {
-  const likeRef = doc(db, "likes", `${postId}_${userId}`);
-  const postRef = doc(db, "posts", postId);
-
-  return await runTransaction(db, async (tx) => {
-    const likeSnap = await tx.get(likeRef);
-    if (likeSnap.exists()) {
-      tx.delete(likeRef);
-      tx.update(postRef, { likesCount: increment(-1) });
-      return "unliked";
-    } else {
-      tx.set(likeRef, { postId, userId, createdAt: serverTimestamp() });
-      tx.update(postRef, { likesCount: increment(1) });
-      return "liked";
-    }
-  });
 }
 
 // ─── Check if current user liked a post ──────────────────────────────────────
@@ -313,13 +185,28 @@ export async function toggleLike(
 // restricted by project-level Firestore rules. A failure here must never
 // block the main feed from rendering.
 
-export async function fetchLikedPostIds(userId: string): Promise<Set<string>> {
+export async function fetchLikedPostIds(
+  userId: string,
+  postIds: string[]
+): Promise<Set<string>> {
+  if (postIds.length === 0) return new Set();
   try {
-    const snap = await getDocs(
-      query(collection(db, "likes"), where("userId", "==", userId))
+    const likeIds = postIds.map((postId) => `${postId}_${userId}`);
+    const batches: string[][] = [];
+    for (let index = 0; index < likeIds.length; index += 10) {
+      batches.push(likeIds.slice(index, index + 10));
+    }
+    const snapshots = await Promise.all(
+      batches.map((ids) =>
+        getDocs(
+          query(collection(db, "likes"), where(documentId(), "in", ids))
+        )
+      )
     );
     const ids = new Set<string>();
-    snap.forEach((d) => ids.add(d.data().postId as string));
+    snapshots.forEach((snapshot) =>
+      snapshot.forEach((d) => ids.add(d.data().postId as string))
+    );
     return ids;
   } catch {
     // Permission denied or collection missing — return empty set so feed loads.
@@ -342,24 +229,19 @@ export function usePosts(currentUserId?: string | null) {
     setError(null);
 
     try {
-      // fetchLikedPostIds already handles its own errors and returns empty Set.
-      // Run both fetches concurrently; likes failure never blocks the feed.
-      const [postsSnap, liked] = await Promise.all([
-        getDocs(
-          query(
-            collection(db, "posts"),
-            orderBy("createdAt", "desc"),
-            limit(POSTS_PER_PAGE)
+      const postsSnap = await getDocs(
+        query(
+          collection(db, "posts"),
+          orderBy("createdAt", "desc"),
+          limit(POSTS_PER_PAGE)
+        )
+      );
+      const liked = currentUserId
+        ? await fetchLikedPostIds(
+            currentUserId,
+            postsSnap.docs.map((postDoc) => postDoc.id)
           )
-        ),
-        currentUserId
-          ? fetchLikedPostIds(currentUserId)
-          : Promise.resolve(new Set<string>()),
-      ]);
-
-      const rawCount = postsSnap.docs.length;
-      const rawIds = postsSnap.docs.map((d) => d.id);
-      console.log("[fetchPosts] fetched doc ids:", rawIds);
+        : new Set<string>();
 
       const fetched: Post[] = postsSnap.docs
         .map((d) => normalizePost(d.id, d.data() as Record<string, unknown>))
@@ -374,10 +256,6 @@ export function usePosts(currentUserId?: string | null) {
           }
           return keep;
         });
-      const keptIds = fetched.map((p) => p.id);
-      console.log("[fetchPosts] raw docs:", rawCount, "→ kept:", fetched.length);
-      console.log("[fetchPosts] kept doc ids:", keptIds);
-
       setPosts(fetched);
       setLikedIds(liked);
     } catch (err: unknown) {
@@ -411,7 +289,7 @@ export function usePosts(currentUserId?: string | null) {
 
   const handleLike = useCallback(
     async (postId: string) => {
-      console.log("[handleLike] called — postId:", postId, "currentUserId:", currentUserId);
+      __DEV__ && console.log("[handleLike] called — postId:", postId, "currentUserId:", currentUserId);
       if (!currentUserId) {
         console.warn("[handleLike] aborted — no currentUserId");
         return;
@@ -425,6 +303,7 @@ export function usePosts(currentUserId?: string | null) {
       } else {
         nextLiked.add(postId);
       }
+      likedIdsRef.current = nextLiked;
       setLikedIds(nextLiked);
       setPosts((prev) =>
         prev.map((p) =>
@@ -436,16 +315,35 @@ export function usePosts(currentUserId?: string | null) {
 
       // Sync to Firestore
       try {
-        await toggleLike(postId, currentUserId);
-        console.log("[handleLike] Firestore sync success — postId:", postId);
+        const response = await setPostLikeCallable({
+          postId,
+          liked: !alreadyLiked,
+          clientMutationId: `${postId}:${currentUserId}:${Date.now()}`,
+        });
+        setPosts((prev) =>
+          prev.map((post) =>
+            post.id === postId
+              ? { ...post, likesCount: response.data.likesCount }
+              : post
+          )
+        );
       } catch (err) {
         console.error("[handleLike] Firestore sync failed — reverting:", err);
-        // Revert on failure — read latest state from ref for accurate revert
-        setLikedIds(new Set(likedIdsRef.current));
+        const reverted = new Set(likedIdsRef.current);
+        if (alreadyLiked) reverted.add(postId);
+        else reverted.delete(postId);
+        likedIdsRef.current = reverted;
+        setLikedIds(reverted);
         setPosts((prev) =>
           prev.map((p) =>
             p.id === postId
-              ? { ...p, likesCount: p.likesCount + (alreadyLiked ? 1 : -1) }
+              ? {
+                  ...p,
+                  likesCount: Math.max(
+                    0,
+                    p.likesCount + (alreadyLiked ? 1 : -1)
+                  ),
+                }
               : p
           )
         );
@@ -486,28 +384,8 @@ export function useUserPosts(userId: string | null) {
     if (!userId) { setPosts([]); return; }
     setLoading(true);
     try {
-      // Three parallel queries — one per known author-field alias
-      const [byUserId, byAuthorId, byUid] = await Promise.all([
-        getDocs(query(collection(db, "posts"), where("userId",   "==", userId))),
-        getDocs(query(collection(db, "posts"), where("authorId", "==", userId))),
-        getDocs(query(collection(db, "posts"), where("uid",      "==", userId))),
-      ]);
-
-      // Deduplicate by doc ID (a post with all three fields would appear 3×)
-      const seen = new Set<string>();
-      const normalized: Post[] = [];
-      for (const snap of [byUserId, byAuthorId, byUid]) {
-        for (const d of snap.docs) {
-          if (seen.has(d.id)) continue;
-          seen.add(d.id);
-          const p = normalizePost(d.id, d.data() as Record<string, unknown>);
-          if (p.mediaUrl) normalized.push(p);
-        }
-      }
-
-      // Sort newest-first client-side
-      normalized.sort((a, b) => getTimestampMs(b.createdAt) - getTimestampMs(a.createdAt));
-      console.log("[fetchUserPosts] userId:", userId, "→ kept:", normalized.length);
+      const normalized = await fetchPostsByUser(userId);
+      __DEV__ && console.log("[fetchUserPosts] userId:", userId, "→ kept:", normalized.length);
       setPosts(normalized);
     } catch (err) {
       console.error("[fetchUserPosts] query failed:", err);
@@ -554,7 +432,7 @@ export function useFollowingPosts(
       }
 
       if (fetchInFlightRef.current) {
-        console.log("[followingFeed] fetch skipped — request already in flight");
+        __DEV__ && console.log("[followingFeed] fetch skipped — request already in flight");
         return;
       }
 
@@ -564,7 +442,7 @@ export function useFollowingPosts(
       else setLoading(true);
 
       try {
-        console.log("[followingFeed] followedIds:", Array.from(followedIds));
+        __DEV__ && console.log("[followingFeed] followedIds:", Array.from(followedIds));
 
         // No one followed → return empty immediately
         if (followedIds.size === 0) {
@@ -572,62 +450,12 @@ export function useFollowingPosts(
           return;
         }
 
-        // Firestore `in` supports max 10 values — batch into groups of 10
-        const ids = Array.from(followedIds);
-        const batches: string[][] = [];
-        for (let i = 0; i < ids.length; i += 10) {
-          batches.push(ids.slice(i, i + 10));
-        }
-
-        // ── Query all known userId field aliases in parallel ────────────────
-        // Old Firestore docs may store the author under `authorId` or `uid`
-        // instead of `userId`. We cannot OR across fields in a single Firestore
-        // query, so we run three separate batch queries and deduplicate by doc ID.
-        //
-        // `orderBy` is intentionally omitted here: combining `where("userId","in",...)`
-        // with `orderBy("createdAt")` requires a composite index that may not be
-        // deployed. Without `orderBy` these are single-field queries — always
-        // auto-indexed by Firestore. Sorting happens client-side below.
-        const [userIdSnaps, authorIdSnaps, uidSnaps] = await Promise.all([
-          Promise.all(
-            batches.map((batch) =>
-              getDocs(query(collection(db, "posts"), where("userId",   "in", batch), limit(POSTS_PER_PAGE)))
-            )
-          ),
-          Promise.all(
-            batches.map((batch) =>
-              getDocs(query(collection(db, "posts"), where("authorId", "in", batch), limit(POSTS_PER_PAGE)))
-            )
-          ),
-          Promise.all(
-            batches.map((batch) =>
-              getDocs(query(collection(db, "posts"), where("uid",      "in", batch), limit(POSTS_PER_PAGE)))
-            )
-          ),
-        ]);
-
-        const allSnaps = [...userIdSnaps, ...authorIdSnaps, ...uidSnaps];
-
-        const fetchedPosts: Post[] = allSnaps.flatMap((snap) =>
-          snap.docs.map((d) =>
-            normalizePost(d.id, d.data() as Record<string, unknown>)
-          )
+        const unique = await fetchPostsByUsers(
+          followedIds,
+          POSTS_PER_PAGE
         );
-
-        const renderablePosts = fetchedPosts.filter((p) => !!p.mediaUrl);
-
-        const sortedPosts = renderablePosts
-          .sort((a, b) => getTimestampMs(b.createdAt) - getTimestampMs(a.createdAt));
-
-        // Final safety dedup before logging and before setPosts. Alias queries
-        // can return the same document up to three times when userId, authorId,
-        // and uid are all present.
-        const unique = Array.from(new Map(sortedPosts.map(p => [p.id, p])).values())
-          .slice(0, POSTS_PER_PAGE);
-
-        console.log("[followingFeed] raw count:", fetchedPosts.length);
-        console.log("[followingFeed] unique count:", unique.length);
-        console.log("[followingFeed] unique ids:", unique.map((p) => p.id));
+        __DEV__ && console.log("[followingFeed] unique count:", unique.length);
+        __DEV__ && console.log("[followingFeed] unique ids:", unique.map((p) => p.id));
 
         // Replace results. Do not append: focus refreshes and followed-id changes
         // should never stack duplicate batches into existing feed state.

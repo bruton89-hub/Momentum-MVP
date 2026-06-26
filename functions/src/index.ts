@@ -22,6 +22,20 @@ import {
   FieldValue,
   Timestamp,
 } from "firebase-admin/firestore";
+import {
+  type CastBattleVoteRequest,
+  type CastBattleVoteResponse,
+  type SetPostLikeRequest,
+  type SetPostLikeResponse,
+} from "./contracts/engagement";
+import { requireAuthenticatedUid } from "./shared/auth";
+import {
+  requireBattleVoteSide,
+  requireBoolean,
+  requireClientMutationId,
+  requireRecord,
+  requireString,
+} from "./shared/validation";
 
 initializeApp();
 
@@ -164,13 +178,178 @@ export const finalizeBattle = onCall(
       };
     });
 
-    logger.info("[finalizeBattle] done", {
-      battleId,
-      requestedBy: uid,
-      outcome: result.status,
-      winner: result.winner,
-    });
+    // Avoid charging for repetitive idempotent info logs when multiple clients
+    // observe the same expired battle.
+    if (result.status === "finalized") {
+      logger.info("[finalizeBattle] done", {
+        battleId,
+        requestedBy: uid,
+        winner: result.winner,
+      });
+    }
 
     return result;
+  }
+);
+
+// ─── Server-authoritative engagement commands ───────────────────────────────
+
+export const castBattleVote = onCall<
+  CastBattleVoteRequest,
+  Promise<CastBattleVoteResponse>
+>(
+  {
+    region: REGION,
+    enforceAppCheck: false,
+  },
+  async (request) => {
+    const uid = requireAuthenticatedUid(request.auth);
+    const data = requireRecord(request.data);
+    const battleId = requireString(data.battleId, "battleId", {
+      maxLength: 128,
+    });
+    const side = requireBattleVoteSide(data.side);
+    requireClientMutationId(data.clientMutationId);
+
+    const battleRef = db.collection("battles").doc(battleId);
+    const voteRef = db.collection("votes").doc(`${battleId}_${uid}`);
+
+    return db.runTransaction(async (tx) => {
+      const [battleSnap, voteSnap] = await Promise.all([
+        tx.get(battleRef),
+        tx.get(voteRef),
+      ]);
+
+      if (!battleSnap.exists) {
+        throw new HttpsError("not-found", "Battle not found.");
+      }
+
+      const battle = (battleSnap.data() ?? {}) as Record<string, unknown>;
+      const playerA = (battle.playerA as BattlePlayer | null) ?? null;
+      const playerB = (battle.playerB as BattlePlayer | null) ?? null;
+      const votesA = typeof battle.votesA === "number" ? battle.votesA : 0;
+      const votesB = typeof battle.votesB === "number" ? battle.votesB : 0;
+
+      if (voteSnap.exists) {
+        const existingSide = voteSnap.get("side");
+        if (existingSide !== side) {
+          throw new HttpsError(
+            "already-exists",
+            "A vote has already been recorded for this battle."
+          );
+        }
+        return {
+          battleId,
+          side,
+          votesA,
+          votesB,
+          outcome: "already_applied" as const,
+        };
+      }
+
+      const endMs = resolveEndTimeMs(battle);
+      if (
+        battle.status !== "live" ||
+        !playerA?.userId ||
+        !playerB?.userId ||
+        (endMs !== null && Date.now() >= endMs)
+      ) {
+        throw new HttpsError(
+          "failed-precondition",
+          "This battle is not open for voting."
+        );
+      }
+      if (uid === playerA.userId || uid === playerB.userId) {
+        throw new HttpsError(
+          "permission-denied",
+          "Battle participants cannot vote in their own battle."
+        );
+      }
+
+      tx.create(voteRef, {
+        battleId,
+        userId: uid,
+        side,
+        createdAt: FieldValue.serverTimestamp(),
+      });
+      tx.update(battleRef, {
+        [side === "A" ? "votesA" : "votesB"]: FieldValue.increment(1),
+      });
+
+      return {
+        battleId,
+        side,
+        votesA: votesA + (side === "A" ? 1 : 0),
+        votesB: votesB + (side === "B" ? 1 : 0),
+        outcome: "applied" as const,
+      };
+    });
+  }
+);
+
+export const setPostLike = onCall<
+  SetPostLikeRequest,
+  Promise<SetPostLikeResponse>
+>(
+  {
+    region: REGION,
+    enforceAppCheck: false,
+  },
+  async (request) => {
+    const uid = requireAuthenticatedUid(request.auth);
+    const data = requireRecord(request.data);
+    const postId = requireString(data.postId, "postId", { maxLength: 128 });
+    const liked = requireBoolean(data.liked, "liked");
+    requireClientMutationId(data.clientMutationId);
+
+    const postRef = db.collection("posts").doc(postId);
+    const likeRef = db.collection("likes").doc(`${postId}_${uid}`);
+
+    return db.runTransaction(async (tx) => {
+      const [postSnap, likeSnap] = await Promise.all([
+        tx.get(postRef),
+        tx.get(likeRef),
+      ]);
+      if (!postSnap.exists) {
+        throw new HttpsError("not-found", "Post not found.");
+      }
+
+      const currentCount =
+        typeof postSnap.get("likesCount") === "number"
+          ? postSnap.get("likesCount")
+          : 0;
+      const alreadyLiked = likeSnap.exists;
+
+      if (liked === alreadyLiked) {
+        return {
+          postId,
+          liked,
+          likesCount: currentCount,
+          outcome: "already_applied" as const,
+        };
+      }
+
+      if (liked) {
+        tx.create(likeRef, {
+          postId,
+          userId: uid,
+          createdAt: FieldValue.serverTimestamp(),
+        });
+      } else {
+        tx.delete(likeRef);
+      }
+
+      const delta = liked ? 1 : -1;
+      tx.update(postRef, {
+        likesCount: FieldValue.increment(delta),
+      });
+
+      return {
+        postId,
+        liked,
+        likesCount: Math.max(0, currentCount + delta),
+        outcome: "applied" as const,
+      };
+    });
   }
 );

@@ -34,7 +34,7 @@ export async function fetchFollowedIds(userId: string): Promise<Set<string>> {
       const followingId = (d.data() as { followingId: string }).followingId;
       if (followingId) ids.add(followingId);
     });
-    console.log("[fetchFollowedIds] loaded", ids.size, "followed ids for", userId);
+    __DEV__ && console.log("[fetchFollowedIds] loaded", ids.size, "followed ids for", userId);
     return ids;
   } catch (err) {
     // Permission denied fires here if firestore.rules has no `follows` rule.
@@ -75,9 +75,9 @@ export function useFollows(currentUserId: string | null) {
       if (!currentUserId || !targetUserId || currentUserId === targetUserId) return;
 
       const docId = followDocId(currentUserId, targetUserId);
-      console.log("[follow] currentUserId:", currentUserId);
-      console.log("[follow] targetUserId:", targetUserId);
-      console.log("[follow] docId:", docId);
+      __DEV__ && console.log("[follow] currentUserId:", currentUserId);
+      __DEV__ && console.log("[follow] targetUserId:", targetUserId);
+      __DEV__ && console.log("[follow] docId:", docId);
 
       // Optimistic: add immediately so UI reflects intent before Firestore confirms
       setFollowedIds((prev) => new Set([...prev, targetUserId]));
@@ -91,7 +91,7 @@ export function useFollows(currentUserId: string | null) {
             createdAt: serverTimestamp(),
           }
         );
-        console.log("[follow] create success — docId:", docId);
+        __DEV__ && console.log("[follow] create success — docId:", docId);
       } catch (err) {
         const code = (err as { code?: string })?.code ?? "unknown";
         console.error("[follow] FAILED — code:", code, "error:", err);
@@ -112,9 +112,9 @@ export function useFollows(currentUserId: string | null) {
       if (!currentUserId || !targetUserId) return;
 
       const docId = followDocId(currentUserId, targetUserId);
-      console.log("[unfollow] currentUserId:", currentUserId);
-      console.log("[unfollow] targetUserId:", targetUserId);
-      console.log("[unfollow] docId:", docId);
+      __DEV__ && console.log("[unfollow] currentUserId:", currentUserId);
+      __DEV__ && console.log("[unfollow] targetUserId:", targetUserId);
+      __DEV__ && console.log("[unfollow] docId:", docId);
 
       // Optimistic: remove immediately
       setFollowedIds((prev) => {
@@ -127,7 +127,7 @@ export function useFollows(currentUserId: string | null) {
         await deleteDoc(
           doc(db, "follows", docId)
         );
-        console.log("[unfollow] delete success — docId:", docId);
+        __DEV__ && console.log("[unfollow] delete success — docId:", docId);
       } catch (err) {
         const code = (err as { code?: string })?.code ?? "unknown";
         console.error("[unfollow] FAILED — code:", code, "error:", err);

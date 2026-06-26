@@ -10,7 +10,7 @@ before a fresh test run.
 
 ### 1. Get a Firebase service account key
 
-1. Open [Firebase Console](https://console.firebase.google.com) → select **momentum-app-prod-1e870**
+1. Open [Firebase Console](https://console.firebase.google.com) and select your Firebase project.
 2. Go to **Project Settings** (gear icon) → **Service Accounts** tab
 3. Click **Generate New Private Key**
 4. Save the downloaded file as:
@@ -36,6 +36,12 @@ npm install --save-dev firebase-admin
 node scripts/cleanup-firestore.js
 ```
 
+Set `FIREBASE_PROJECT_ID` before running:
+
+```bash
+FIREBASE_PROJECT_ID=your-project-id node scripts/cleanup-firestore.js
+```
+
 The script will:
 
 1. **Count** documents in each target collection and print a summary table
@@ -47,7 +53,7 @@ The script will:
 ### Dry run (count + backup, no deletes)
 
 ```bash
-DRY_RUN=true node scripts/cleanup-firestore.js
+FIREBASE_PROJECT_ID=your-project-id DRY_RUN=true node scripts/cleanup-firestore.js
 ```
 
 ---
@@ -58,10 +64,10 @@ If you need to undo the cleanup:
 
 ```bash
 # Restore the most recent backup automatically:
-node scripts/rollback-firestore.js --latest
+FIREBASE_PROJECT_ID=your-project-id node scripts/rollback-firestore.js --latest
 
 # Or restore a specific backup file:
-node scripts/rollback-firestore.js backup-2025-01-01T12-00-00.json
+FIREBASE_PROJECT_ID=your-project-id node scripts/rollback-firestore.js backup-2025-01-01T12-00-00.json
 ```
 
 ---

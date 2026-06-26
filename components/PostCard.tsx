@@ -7,6 +7,7 @@ import {
   Dimensions,
   Animated,
   Alert,
+  Image,
 } from "react-native";
 import { ResizeMode, Video } from "expo-av";
 import { useRouter } from "expo-router";
@@ -21,6 +22,7 @@ import {
   normalizeFirebaseStorageUrl,
 } from "@/utils/media";
 import type { Post } from "@/types";
+import { VIDEO_AUDIO_TRACKS } from "@/constants/videoEditing";
 
 const { width: SCREEN_W } = Dimensions.get("window");
 const MEDIA_HEIGHT = Math.round(SCREEN_W * 0.88); // ~9:10 — tall, portrait
@@ -91,7 +93,7 @@ function PostCard({
   const [showHeart, setShowHeart] = useState(false);
   const [mediaError, setMediaError] = useState(false);
   const [thumbnailUri, setThumbnailUri] = useState("");
-  const [userRequestedPlayback, setUserRequestedPlayback] = useState(false);
+  const [isMuted, setIsMuted] = useState(true);
   const lastTap = useRef(0);
   const handleMediaError = useCallback(() => setMediaError(true), []);
 
@@ -108,6 +110,12 @@ function PostCard({
   // isVideoMedia checks both the stored mediaType field AND the URL extension,
   // so legacy posts with mediaType:"image" but a .mp4 URL are handled correctly.
   const postIsVideo = isVideoMedia(normalizedMediaUrl || post.mediaUrl, post.mediaType);
+  const musicLabel = VIDEO_AUDIO_TRACKS.find(
+    (track) => track.id === post.videoEdit?.music
+  )?.label;
+  const hasTrim =
+    !!post.videoEdit &&
+    (post.videoEdit.trimStart > 0 || post.videoEdit.trimEnd !== null);
 
   // isValidMediaUrl is only used for image-branch decisions (in MediaTile).
   // We compute it here for the DEV log so we can see it alongside other values.
@@ -116,8 +124,7 @@ function PostCard({
   // shouldPlayVideo: true only when parent explicitly enables playback AND
   // this specific post is the currently visible one.
   const shouldPlayVideo =
-    userRequestedPlayback &&
-    (!enableVideoPlayback || isActive) &&
+    enableVideoPlayback &&
     isActive &&
     postIsVideo &&
     !!normalizedMediaUrl &&
@@ -125,7 +132,7 @@ function PostCard({
   useEffect(() => {
     setMediaError(false);
     setThumbnailUri("");
-    setUserRequestedPlayback(false);
+    setIsMuted(true);
   }, [post.id, normalizedMediaUrl]);
 
   useEffect(() => {
@@ -145,7 +152,7 @@ function PostCard({
 
   useEffect(() => {
     if (!isActive) {
-      setUserRequestedPlayback(false);
+      videoRef.current?.pauseAsync().catch(() => undefined);
     }
   }, [isActive]);
 
@@ -165,7 +172,7 @@ function PostCard({
     const gap = now - lastTap.current;
     lastTap.current = now;
     if (gap < 300) {
-      console.log("[PostCard] double-tap like — postId:", post.id, "isLiked:", isLiked);
+      __DEV__ && console.log("[PostCard] double-tap like — postId:", post.id, "isLiked:", isLiked);
       if (!isLiked) onLike(post.id);
       flashHeart();
     }
@@ -173,7 +180,7 @@ function PostCard({
 
   function handleMediaPress() {
     if (postIsVideo && normalizedMediaUrl && !mediaError) {
-      setUserRequestedPlayback(true);
+      setIsMuted((muted) => !muted);
     }
     handleDoubleTap();
   }
@@ -198,7 +205,7 @@ function PostCard({
         <Pressable
           style={styles.headerLeft}
           onPress={() => {
-            console.log("[PostCard] profile pressed — userId:", post.userId,
+            __DEV__ && console.log("[PostCard] profile pressed — userId:", post.userId,
               "isSelf:", post.userId === currentUserId);
             openAthleteProfile(router, post.userId, currentUserId);
           }}
@@ -221,7 +228,7 @@ function PostCard({
           {showFollowBtn && (
             <Pressable
               onPress={() => {
-                console.log("[PostCard] follow pressed — targetUserId:", post.userId, "isFollowing:", isFollowing);
+                __DEV__ && console.log("[PostCard] follow pressed — targetUserId:", post.userId, "isFollowing:", isFollowing);
                 onFollow!(post.userId, isFollowing);
               }}
               style={[styles.followBtn, isFollowing && styles.followingBtn]}
@@ -241,7 +248,14 @@ function PostCard({
 
       {/* ── Media ────────────────────────────────────────────────────────────── */}
       <Pressable onPress={handleMediaPress} style={styles.mediaWrapper}>
-        {postIsVideo && normalizedMediaUrl && !mediaError ? (
+        {postIsVideo && post.videoEdit?.coverUri ? (
+          <Image
+            source={{ uri: post.videoEdit.coverUri }}
+            style={styles.media}
+            resizeMode="cover"
+            onError={handleMediaError}
+          />
+        ) : postIsVideo && normalizedMediaUrl && !mediaError ? (
           // ── Video: always render <Video> so the first frame is visible ──────
           // shouldPlay controls whether it actually plays (true only for the
           // currently-visible post when enableVideoPlayback=true).
@@ -254,7 +268,7 @@ function PostCard({
             resizeMode={ResizeMode.COVER}
             shouldPlay={shouldPlayVideo}
             isLooping={false}
-            isMuted
+            isMuted={isMuted}
             useNativeControls={false}
             usePoster={!!thumbnailUri}
             posterSource={thumbnailUri ? { uri: thumbnailUri } : undefined}
@@ -286,6 +300,31 @@ function PostCard({
           </View>
         )}
 
+        {postIsVideo && musicLabel && (
+          <View style={styles.musicBadge}>
+            <Text style={styles.metadataText}>🎵 {musicLabel}</Text>
+          </View>
+        )}
+
+        {__DEV__ && postIsVideo && hasTrim && (
+          <View style={styles.trimBadge}>
+            <Text style={styles.metadataText}>
+              Trim {post.videoEdit!.trimStart.toFixed(1)}s–
+              {post.videoEdit!.trimEnd === null
+                ? "end"
+                : `${post.videoEdit!.trimEnd.toFixed(1)}s`}
+            </Text>
+          </View>
+        )}
+
+        {postIsVideo && !!post.videoEdit?.textOverlay.trim() && (
+          <View pointerEvents="none" style={styles.postTextOverlayWrap}>
+            <Text style={styles.postTextOverlay}>
+              {post.videoEdit.textOverlay.trim()}
+            </Text>
+          </View>
+        )}
+
         {/* Double-tap heart */}
         {showHeart && (
           <Animated.Text
@@ -303,7 +342,7 @@ function PostCard({
           {/* Like */}
           <Pressable
             onPress={() => {
-              console.log("[PostCard] like pressed — postId:", post.id, "isLiked:", isLiked);
+              __DEV__ && console.log("[PostCard] like pressed — postId:", post.id, "isLiked:", isLiked);
               onLike(post.id);
             }}
             style={styles.actionBtn}
@@ -334,7 +373,7 @@ function PostCard({
           {showBattleBtn && (
             <Pressable
               onPress={() => {
-                console.log("[PostCard] battle pressed — postId:", post.id, "isBattling:", isBattling);
+                __DEV__ && console.log("[PostCard] battle pressed — postId:", post.id, "isBattling:", isBattling);
                 onBattle!(post);
               }}
               disabled={isBattling}
@@ -366,7 +405,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.card,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.cardBorder,
-    marginBottom: 2,
+    marginBottom: SPACING.sm,
   },
 
   // ── Header ──────────────────────────────────────────────────────────────────
@@ -374,7 +413,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm + 2,
+    paddingVertical: SPACING.md,
   },
   headerLeft: {
     flex: 1,
@@ -391,12 +430,13 @@ const styles = StyleSheet.create({
   username: {
     color: COLORS.textPrimary,
     fontWeight: FONTS.bold,
-    fontSize: 14,
+    fontSize: 15,
+    letterSpacing: 0.2,
   },
   handle: {
     color: COLORS.textHandle,
     fontSize: 12,
-    marginTop: 1,
+    marginTop: 2,
   },
   battleBadge: {
     backgroundColor: COLORS.accentFaint,
@@ -491,6 +531,48 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: FONTS.bold,
   },
+  musicBadge: {
+    position: "absolute",
+    top: SPACING.md,
+    left: SPACING.md,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: 5,
+    borderRadius: RADIUS.full,
+    backgroundColor: "rgba(0,0,0,0.72)",
+    borderWidth: 1,
+    borderColor: COLORS.accent,
+  },
+  trimBadge: {
+    position: "absolute",
+    top: 48,
+    left: SPACING.md,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: 4,
+    borderRadius: RADIUS.xs,
+    backgroundColor: "rgba(0,0,0,0.72)",
+  },
+  metadataText: {
+    color: COLORS.accent,
+    fontSize: 11,
+    fontWeight: FONTS.bold,
+  },
+  postTextOverlayWrap: {
+    position: "absolute",
+    left: SPACING.xl,
+    right: SPACING.xl,
+    bottom: 52,
+    alignItems: "center",
+  },
+  postTextOverlay: {
+    color: COLORS.white,
+    fontSize: 24,
+    lineHeight: 29,
+    fontWeight: FONTS.heavy,
+    textAlign: "center",
+    textShadowColor: COLORS.black,
+    textShadowOffset: { width: 1, height: 2 },
+    textShadowRadius: 4,
+  },
   heartOverlay: {
     position: "absolute",
     fontSize: 72,
@@ -501,9 +583,9 @@ const styles = StyleSheet.create({
   // ── Footer ───────────────────────────────────────────────────────────────────
   footer: {
     paddingHorizontal: SPACING.md,
-    paddingTop: SPACING.sm + 2,
+    paddingTop: SPACING.md,
     paddingBottom: SPACING.md,
-    gap: SPACING.sm,
+    gap: SPACING.sm + 2,
   },
   actionRow: {
     flexDirection: "row",
@@ -556,7 +638,7 @@ const styles = StyleSheet.create({
   caption: {
     color: COLORS.textSecondary,
     fontSize: 13,
-    lineHeight: 19,
+    lineHeight: 20,
     flexShrink: 1,
   },
   hashtag: {

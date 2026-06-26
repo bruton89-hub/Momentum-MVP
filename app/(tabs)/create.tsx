@@ -8,14 +8,17 @@ import {
   Image,
   Pressable,
   Alert,
-  Platform,
   Dimensions,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as ImagePicker from "expo-image-picker";
 import { useRouter } from "expo-router";
 import { useAuthStore } from "@/store/authStore";
-import { uploadMedia, createPost } from "@/hooks/usePosts";
+import {
+  uploadMedia,
+  createPost,
+  MAX_POST_MEDIA_BYTES,
+} from "@/hooks/usePosts";
 import { createBattle } from "@/hooks/useBattles";
 import {
   COLORS,
@@ -26,6 +29,10 @@ import {
   BATTLE_DURATIONS,
 } from "@/constants/theme";
 import GlowButton from "@/components/GlowButton";
+import VideoPostEditor from "@/components/VideoPostEditor";
+import {
+  type VideoAudioTrackId,
+} from "@/constants/videoEditing";
 
 const { width: SCREEN_W } = Dimensions.get("window");
 const MEDIA_PREVIEW_H = Math.round(SCREEN_W * 0.72);
@@ -37,7 +44,16 @@ export default function CreateScreen() {
 
   const [mediaUri, setMediaUri] = useState<string | null>(null);
   const [mediaType, setMediaType] = useState<"image" | "video">("image");
+  const [selectedMedia, setSelectedMedia] = useState<
+    ImagePicker.ImagePickerAsset[]
+  >([]);
   const [caption, setCaption] = useState("");
+  const [selectedMusic, setSelectedMusic] =
+    useState<VideoAudioTrackId | null>(null);
+  const [trimStart, setTrimStart] = useState(0);
+  const [trimEnd, setTrimEnd] = useState<number | null>(null);
+  const [textOverlay, setTextOverlay] = useState("");
+  const [selectedCoverUri, setSelectedCoverUri] = useState<string | null>(null);
   const [battleEnabled, setBattleEnabled] = useState(false);
   const [category, setCategory] = useState(BATTLE_CATEGORIES[0] as string);
   const [durationHours, setDurationHours] = useState(BATTLE_DURATIONS[0].hours);
@@ -52,13 +68,31 @@ export default function CreateScreen() {
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.All,
         quality: 0.8,
-        allowsEditing: Platform.OS !== "web",
+        videoMaxDuration: 60,
+        allowsEditing: false,
         aspect: [4, 3],
       });
       if (!result.canceled && result.assets.length > 0) {
         const asset = result.assets[0];
+        if (
+          typeof asset.fileSize === "number" &&
+          asset.fileSize > MAX_POST_MEDIA_BYTES
+        ) {
+          Alert.alert(
+            "Media too large",
+            "Choose a photo or video that is 50 MB or smaller."
+          );
+          return;
+        }
+        console.log("Create Post selectedMedia[0]", asset);
+        setSelectedMedia([asset]);
         setMediaUri(asset.uri);
         setMediaType(asset.type === "video" ? "video" : "image");
+        setSelectedMusic(null);
+        setTrimStart(0);
+        setTrimEnd(null);
+        setTextOverlay("");
+        setSelectedCoverUri(null);
       }
     } catch (err) {
       console.error("Create media picker failed", err);
@@ -80,9 +114,7 @@ export default function CreateScreen() {
     setUploadProgress(0);
 
     try {
-      const mediaUrl = await uploadMedia(mediaUri, userId, (pct) => {
-        setUploadProgress(pct);
-      });
+      const mediaUrl = await uploadMedia(mediaUri, userId, setUploadProgress);
 
       setIsUploading(false);
       setIsSubmitting(true);
@@ -96,6 +128,13 @@ export default function CreateScreen() {
         mediaType,
         caption: caption.trim(),
         battleEnabled,
+        videoEdit: {
+          music: selectedMusic,
+          trimStart,
+          trimEnd,
+          textOverlay,
+          coverUri: selectedCoverUri,
+        },
       });
 
       if (battleEnabled) {
@@ -117,7 +156,13 @@ export default function CreateScreen() {
       // Reset
       setMediaUri(null);
       setMediaType("image");
+      setSelectedMedia([]);
       setCaption("");
+      setSelectedMusic(null);
+      setTrimStart(0);
+      setTrimEnd(null);
+      setTextOverlay("");
+      setSelectedCoverUri(null);
       setBattleEnabled(false);
       setUploadProgress(0);
 
@@ -136,6 +181,39 @@ export default function CreateScreen() {
   const busy = isUploading || isSubmitting;
   const charCount = caption.length;
   const MAX_CAPTION = 150;
+  const hasSelectedMedia = selectedMedia.length > 0;
+
+  const thumbnailRow = (
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      contentContainerStyle={styles.thumbStrip}
+    >
+      {hasSelectedMedia && (
+        <Pressable onPress={pickMedia} style={styles.thumbItem}>
+          {mediaType === "image" ? (
+            <Image
+              source={{ uri: selectedMedia[0].uri }}
+              style={styles.thumbImage}
+              resizeMode="cover"
+            />
+          ) : (
+            <View style={[styles.thumbImage, styles.thumbVideo]}>
+              <Text style={styles.thumbVideoIcon}>▶</Text>
+            </View>
+          )}
+          {mediaType === "video" && (
+            <View style={styles.thumbBadge}>
+              <Text style={styles.thumbBadgeText}>0:08</Text>
+            </View>
+          )}
+        </Pressable>
+      )}
+      <Pressable onPress={pickMedia} style={styles.thumbAdd}>
+        <Text style={styles.thumbAddIcon}>+</Text>
+      </Pressable>
+    </ScrollView>
+  );
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -199,33 +277,27 @@ export default function CreateScreen() {
         </Pressable>
 
         {/* ── Thumbnail strip (selected + add more) ───────────────────────── */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.thumbStrip}
-        >
-          {mediaUri && (
-            <Pressable onPress={pickMedia} style={styles.thumbItem}>
-              {mediaType === "image" ? (
-                <Image source={{ uri: mediaUri }} style={styles.thumbImage} resizeMode="cover" />
-              ) : (
-                <View style={[styles.thumbImage, styles.thumbVideo]}>
-                  <Text style={styles.thumbVideoIcon}>▶</Text>
-                </View>
-              )}
-              {/* Duration badge */}
-              {mediaType === "video" && (
-                <View style={styles.thumbBadge}>
-                  <Text style={styles.thumbBadgeText}>0:08</Text>
-                </View>
-              )}
-            </Pressable>
-          )}
-          {/* Add more button */}
-          <Pressable onPress={pickMedia} style={styles.thumbAdd}>
-            <Text style={styles.thumbAddIcon}>+</Text>
-          </Pressable>
-        </ScrollView>
+        {thumbnailRow}
+
+        {selectedMedia.length > 0 && (
+          <>
+            <VideoPostEditor
+              uri={selectedMedia[0].uri}
+              selectedMusic={selectedMusic}
+              onSelectedMusicChange={setSelectedMusic}
+              trimStart={trimStart}
+              onTrimStartChange={setTrimStart}
+              trimEnd={trimEnd}
+              onTrimEndChange={setTrimEnd}
+              textOverlay={textOverlay}
+              onTextOverlayChange={setTextOverlay}
+              selectedCoverUri={selectedCoverUri}
+              onSelectedCoverUriChange={setSelectedCoverUri}
+              showPreview={false}
+              disabled={busy}
+            />
+          </>
+        )}
 
         {/* ── Caption ─────────────────────────────────────────────────────── */}
         <View style={styles.captionWrap}>
@@ -342,7 +414,7 @@ export default function CreateScreen() {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: COLORS.background },
   scroll: { flex: 1 },
-  content: { paddingBottom: 120, gap: SPACING.sm },
+  content: { paddingBottom: 180, gap: SPACING.sm },
 
   // ── Top bar ────────────────────────────────────────────────────────────────
   topBar: {
@@ -365,9 +437,9 @@ const styles = StyleSheet.create({
   },
   topBarTitle: {
     color: COLORS.textPrimary,
-    fontSize: 17,
+    fontSize: 18,
     fontWeight: FONTS.heavy,
-    letterSpacing: 0.3,
+    letterSpacing: 0.4,
   },
   topBarNext: {
     width: 50,
@@ -385,12 +457,20 @@ const styles = StyleSheet.create({
   // ── Media picker ───────────────────────────────────────────────────────────
   mediaPicker: {
     height: MEDIA_PREVIEW_H,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.cardBorder,
+    marginHorizontal: SPACING.lg,
+    marginTop: SPACING.md,
+    borderRadius: RADIUS.lg,
+    borderWidth: 1.5,
+    borderColor: COLORS.inputBorder,
+    borderStyle: "dashed",
     backgroundColor: COLORS.surface,
     overflow: "hidden",
   },
-  mediaPickerFilled: {},
+  mediaPickerFilled: {
+    borderWidth: 1,
+    borderStyle: "solid",
+    borderColor: COLORS.cardBorder,
+  },
   mediaPreview: { width: "100%", height: "100%" },
   videoPreview: {
     alignItems: "center",
@@ -481,13 +561,15 @@ const styles = StyleSheet.create({
   captionInput: {
     color: COLORS.textPrimary,
     fontSize: 15,
-    minHeight: 88,
+    lineHeight: 21,
+    minHeight: 96,
     textAlignVertical: "top",
   },
   charCount: {
     color: COLORS.textMuted,
     fontSize: 11,
     textAlign: "right",
+    marginTop: SPACING.xs,
   },
 
   // ── Battle toggle ──────────────────────────────────────────────────────────

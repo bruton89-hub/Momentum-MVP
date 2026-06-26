@@ -32,7 +32,7 @@ const path     = require("path");
 const fs       = require("fs");
 const readline = require("readline");
 
-const PROJECT_ID          = "momentum-app-prod-1e870";
+const PROJECT_ID          = process.env.FIREBASE_PROJECT_ID;
 const SERVICE_ACCOUNT_PATH = path.join(__dirname, "serviceAccountKey.json");
 const BACKUPS_DIR         = path.join(__dirname, "backups");
 const RESTORE_BATCH_SIZE  = 400;
@@ -104,6 +104,16 @@ function deserializeValue(admin, value) {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
+  if (!PROJECT_ID) {
+    console.error(`
+ERROR: FIREBASE_PROJECT_ID is required.
+
+Set it in your shell before running this script:
+  FIREBASE_PROJECT_ID=your-project-id node scripts/rollback-firestore.js --latest
+`);
+    process.exit(1);
+  }
+
   const backupFile = resolveBackupPath(process.argv[2]);
 
   // ── Load & validate backup ────────────────────────────────────────────────

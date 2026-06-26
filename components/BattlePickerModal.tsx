@@ -19,10 +19,8 @@ import {
   ActivityIndicator,
   Alert,
 } from "react-native";
-import { collection, query, where, getDocs } from "firebase/firestore";
-import { db } from "@/config/firebase";
-import { createBattle, acceptChallenge } from "@/hooks/useBattles";
-import { normalizePost } from "@/hooks/usePosts";
+import { createLiveBattle } from "@/hooks/useBattles";
+import { fetchPostsByUser } from "@/services/postRepository";
 import { COLORS, SPACING, RADIUS, FONTS } from "@/constants/theme";
 import AvatarImage from "./AvatarImage";
 import MediaTile from "./MediaTile";
@@ -114,47 +112,11 @@ export default function BattlePickerModal({
     setSelectedPostId(null);
     setLoadingPosts(true);
 
-    console.log("[challengePicker] currentUserId:", currentUserId);
+    __DEV__ && console.log("[challengePicker] currentUserId:", currentUserId);
 
-    Promise.all([
-      getDocs(query(collection(db, "posts"), where("userId",   "==", currentUserId))),
-      getDocs(query(collection(db, "posts"), where("authorId", "==", currentUserId))),
-      getDocs(query(collection(db, "posts"), where("uid",      "==", currentUserId))),
-    ])
-      .then(([byUserId, byAuthorId, byUid]) => {
-        // Log raw doc counts per alias query
-        console.log("[challengePicker] raw docs — userId:", byUserId.docs.length,
-          "authorId:", byAuthorId.docs.length, "uid:", byUid.docs.length);
-
-        // Deduplicate: a post written with all three fields appears in all three results
-        const seen = new Set<string>();
-        const rawPosts: Post[] = [];
-        for (const snap of [byUserId, byAuthorId, byUid]) {
-          for (const d of snap.docs) {
-            if (!seen.has(d.id)) {
-              seen.add(d.id);
-              rawPosts.push(normalizePost(d.id, d.data() as Record<string, unknown>));
-            }
-          }
-        }
-        console.log("[challengePicker] normalized docs:", rawPosts.length);
-
-        // Keep only posts that have renderable media (image or video placeholder)
-        const eligible = rawPosts
-          .filter((p) => !!p.mediaUrl)
-          .sort((a, b) => {
-            // Sort newest-first using the Timestamp helper
-            const ms = (ts: Post["createdAt"]) => {
-              if (!ts) return 0;
-              if (typeof (ts as { toMillis?: () => number }).toMillis === "function") {
-                return (ts as { toMillis: () => number }).toMillis();
-              }
-              return (ts as { seconds: number }).seconds * 1000;
-            };
-            return ms(b.createdAt) - ms(a.createdAt);
-          });
-
-        console.log("[challengePicker] eligible posts:", eligible.length,
+    fetchPostsByUser(currentUserId)
+      .then((eligible) => {
+        __DEV__ && console.log("[challengePicker] eligible posts:", eligible.length,
           eligible.map((p) => ({ id: p.id, mediaType: p.mediaType, caption: p.caption })));
 
         setMyPosts(eligible);
@@ -171,7 +133,7 @@ export default function BattlePickerModal({
   // ── Create the live battle ──────────────────────────────────────────────────
   async function handlePickPost(myPost: Post) {
     if (!targetPost || !currentProfile || creating) return;
-    console.log("[challengePicker] selected post:", {
+    __DEV__ && console.log("[challengePicker] selected post:", {
       id:        myPost.id,
       mediaType: myPost.mediaType,
       mediaUrl:  myPost.mediaUrl ? myPost.mediaUrl.slice(0, 60) + "…" : "MISSING",
@@ -201,16 +163,18 @@ export default function BattlePickerModal({
         postId:    myPost.id,
       };
 
-      // Step 1 — create an open battle (playerA, status: "open")
-      const battleId = await createBattle({
+      // Create the LIVE battle in a single write (both players + status:"live").
+      // The challenger is the creator AND playerB, so the old
+      // create-open-then-accept path was rejected by Firestore rules (a creator
+      // may not accept their own challenge). A one-shot live create conforms to
+      // the rules and leaves no orphaned open battle.
+      await createLiveBattle({
         creatorId:     currentUserId,
         playerA,
+        playerB,
         category:      "Highlights",
         durationHours: 24,
       });
-
-      // Step 2 — accept it immediately (sets playerB, status → "live")
-      await acceptChallenge(battleId, playerB);
 
       onBattleCreated();
       onClose();

@@ -12,7 +12,7 @@ import {
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useFocusEffect } from "@react-navigation/native";
+import { useFocusEffect, useIsFocused } from "@react-navigation/native";
 import { useRouter } from "expo-router";
 import { useAuthStore } from "@/store/authStore";
 import { usePosts, useFollowingPosts } from "@/hooks/usePosts";
@@ -24,18 +24,22 @@ import BattlePickerModal from "@/components/BattlePickerModal";
 import EmptyState from "@/components/EmptyState";
 import GlowButton from "@/components/GlowButton";
 import LoadingSpinner from "@/components/LoadingSpinner";
+import { isVideoMedia } from "@/utils/media";
 import type { Post } from "@/types";
 
 type FeedTab = "forYou" | "following";
 
 export default function HomeScreen() {
   const router = useRouter();
+  const isFocused = useIsFocused();
   const userId  = useAuthStore((s) => s.userId);
   const profile = useAuthStore((s) => s.profile);
   const [feedTab, setFeedTab] = useState<FeedTab>("forYou");
   const [activeVideoPostId, setActiveVideoPostId] = useState<string | null>(null);
   const [showWelcome, setShowWelcome] = useState(false);
-  const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 72 }).current;
+  const viewabilityConfig = useRef({
+    viewAreaCoveragePercentThreshold: 65,
+  }).current;
 
   // ── For You feed ─────────────────────────────────────────────────────────────
   const {
@@ -82,7 +86,7 @@ export default function HomeScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      console.log("[Home] useFocusEffect fired — feedTab:", feedTab);
+      __DEV__ && console.log("[Home] useFocusEffect fired — feedTab:", feedTab);
       // Always re-fetch the follows list so Follow state is current after
       // navigating away (e.g. tapping Follow on the player profile screen).
       refreshFollowsRef.current();
@@ -101,7 +105,7 @@ export default function HomeScreen() {
   const activeError    = isForYou ? fyError        : null;
 
   useEffect(() => {
-    console.log("[Home] activePosts passed to FlatList:", activePosts.length, "feedTab:", feedTab);
+    __DEV__ && console.log("[Home] activePosts passed to FlatList:", activePosts.length, "feedTab:", feedTab);
   }, [activePosts, feedTab]);
 
   useEffect(() => {
@@ -129,7 +133,7 @@ export default function HomeScreen() {
   // ── Follow / Unfollow ─────────────────────────────────────────────────────────
   const handleFollow = useCallback(
     (targetUserId: string, isCurrentlyFollowing: boolean) => {
-      console.log("[Home] handleFollow called — targetUserId:", targetUserId, "isCurrentlyFollowing:", isCurrentlyFollowing);
+      __DEV__ && console.log("[Home] handleFollow called — targetUserId:", targetUserId, "isCurrentlyFollowing:", isCurrentlyFollowing);
       if (isCurrentlyFollowing) unfollow(targetUserId);
       else follow(targetUserId);
     },
@@ -147,7 +151,7 @@ export default function HomeScreen() {
 
   const handleBattle = useCallback(
     async (post: Post) => {
-      console.log("[Home] handleBattle called — postId:", post.id, "postUserId:", post.userId, "currentUserId:", userId);
+      __DEV__ && console.log("[Home] handleBattle called — postId:", post.id, "postUserId:", post.userId, "currentUserId:", userId);
       if (!userId || !profile) {
         console.warn("[Home] handleBattle aborted — missing userId or profile");
         return;
@@ -188,11 +192,18 @@ export default function HomeScreen() {
   const handleViewableItemsChanged = useRef(
     ({ viewableItems }: { viewableItems: ViewToken[] }) => {
       const activeVideo = viewableItems.find(
-        ({ item, isViewable }) => isViewable && item.mediaType === "video" && !!item.mediaUrl
+        ({ item, isViewable }) =>
+          isViewable &&
+          isVideoMedia(item.mediaUrl, item.mediaType) &&
+          !!item.mediaUrl?.trim()
       );
       setActiveVideoPostId(activeVideo?.item.id ?? null);
     }
   ).current;
+
+  useEffect(() => {
+    setActiveVideoPostId(null);
+  }, [feedTab]);
 
   // ── Loading ───────────────────────────────────────────────────────────────────
   if (activeLoading) {
@@ -233,7 +244,7 @@ export default function HomeScreen() {
             onBattle={handleBattle}
             isBattling={startingBattlePostId === item.id}
             enableVideoPlayback
-            isActiveVideo={activeVideoPostId === item.id}
+            isActiveVideo={isFocused && activeVideoPostId === item.id}
           />
         )}
         onViewableItemsChanged={handleViewableItemsChanged}
@@ -403,13 +414,14 @@ const styles = StyleSheet.create({
   tab: {
     paddingHorizontal: SPACING.lg,
     alignItems: "center",
-    paddingTop: SPACING.sm,
+    paddingTop: SPACING.sm + 2,
     paddingBottom: 0,
   },
   tabText: {
     color: COLORS.textMuted,
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: FONTS.semibold,
+    letterSpacing: 0.3,
   },
   tabTextActive: {
     color: COLORS.textPrimary,
@@ -417,10 +429,10 @@ const styles = StyleSheet.create({
   },
   tabUnderline: {
     width: "100%",
-    height: 2,
-    borderRadius: 2,
+    height: 3,
+    borderRadius: 3,
     backgroundColor: COLORS.transparent,
-    marginTop: SPACING.sm,
+    marginTop: SPACING.sm + 2,
   },
   tabUnderlineActive: {
     backgroundColor: COLORS.accent,

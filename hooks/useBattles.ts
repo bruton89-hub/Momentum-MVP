@@ -1,21 +1,21 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import {
   collection,
   query,
   where,
   orderBy,
+  limit,
   getDocs,
   addDoc,
   doc,
   getDoc,
   updateDoc,
-  runTransaction,
   serverTimestamp,
   Timestamp,
-  increment,
+  documentId,
 } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
-import { db, functions } from "@/config/firebase";
+import { auth, db, functions } from "@/config/firebase";
 import type { Battle, BattlePlayer, Vote } from "@/types";
 
 // ─── Server-authoritative finalization ───────────────────────────────────────
@@ -29,10 +29,37 @@ type FinalizeBattleResult = {
   winner: string | null;
 };
 
+type CastBattleVoteResult = {
+  battleId: string;
+  side: "A" | "B";
+  votesA: number;
+  votesB: number;
+  outcome: "applied" | "already_applied";
+};
+
+const BATTLES_PAGE_SIZE = 30;
+
 const finalizeBattleCallable = httpsCallable<
   { battleId: string },
   FinalizeBattleResult
 >(functions, "finalizeBattle");
+const castBattleVoteCallable = httpsCallable<
+  { battleId: string; side: "A" | "B"; clientMutationId: string },
+  CastBattleVoteResult
+>(functions, "castBattleVote");
+
+// ─── Session-scoped finalize guard ───────────────────────────────────────────
+// Module-level (not per-hook-instance) so it survives hook remounts, tab
+// re-focus, and re-renders. Once a battleId has been sent to finalizeBattle in
+// this app session it is never sent again — preventing the callable from being
+// hammered on every focus/render. It is cleared only when the signed-in user
+// changes (sign-in/out/switch) or on an explicit manual refresh, so a genuine
+// retry is still possible. See `clearFinalizeGuard`.
+const sessionFinalizeGuard = new Set<string>();
+
+function clearFinalizeGuard(): void {
+  sessionFinalizeGuard.clear();
+}
 
 // ─── Timestamp → milliseconds (handles Firestore Timestamp and plain objects) ─
 
@@ -216,7 +243,7 @@ export async function createBattle(input: CreateBattleInput): Promise<string> {
   const endTime = Timestamp.fromMillis(
     Date.now() + input.durationHours * 3_600_000
   );
-  console.log("[createBattle] creating —", {
+  __DEV__ && console.log("[createBattle] creating —", {
     creatorId: input.creatorId,
     playerA: { userId: input.playerA.userId, username: input.playerA.username,
                mediaType: input.playerA.mediaType, hasMedia: !!input.playerA.mediaUrl },
@@ -238,10 +265,66 @@ export async function createBattle(input: CreateBattleInput): Promise<string> {
       statsRecorded: false,
       createdAt: serverTimestamp(),
     });
-    console.log("[createBattle] success — battleId:", docRef.id);
+    __DEV__ && console.log("[createBattle] success — battleId:", docRef.id);
     return docRef.id;
   } catch (err) {
     console.error("[createBattle] error:", err);
+    throw err;
+  }
+}
+
+// ─── Create a LIVE battle directly (direct challenge) ────────────────────────
+// Used by the "Challenge" flow where the challenger pits their own post against
+// a target post. Unlike createBattle (open challenge, accepted later by a
+// DIFFERENT user), this writes both players and status:"live" in a SINGLE
+// document create.
+//
+// Why a single write: Firestore rules allow the creator to create a battle in
+// any status (the `allow create` rule only checks creatorId == auth.uid), but
+// they FORBID the creator from "accepting" their own open challenge
+// (`isAcceptingChallenge` requires creatorId != auth.uid). The old
+// create-open-then-self-accept sequence therefore always failed at the accept
+// step with permission-denied and left an orphaned open battle behind. Creating
+// the live battle in one write conforms to the existing rules and leaves no
+// orphan.
+export interface CreateLiveBattleInput {
+  creatorId: string;
+  playerA: BattlePlayer;
+  playerB: BattlePlayer;
+  category: string;
+  durationHours: number;
+}
+
+export async function createLiveBattle(input: CreateLiveBattleInput): Promise<string> {
+  const endTime = Timestamp.fromMillis(
+    Date.now() + input.durationHours * 3_600_000
+  );
+  __DEV__ && console.log("[createLiveBattle] creating —", {
+    creatorId: input.creatorId,
+    playerA: { userId: input.playerA.userId, username: input.playerA.username },
+    playerB: { userId: input.playerB.userId, username: input.playerB.username },
+    category: input.category,
+    durationHours: input.durationHours,
+  });
+  try {
+    const docRef = await addDoc(collection(db, "battles"), {
+      creatorId: input.creatorId,
+      playerA: input.playerA,
+      playerB: input.playerB,
+      votesA: 0,
+      votesB: 0,
+      status: "live",
+      category: input.category,
+      durationHours: input.durationHours,
+      endTime,
+      winner: null,
+      statsRecorded: false,
+      createdAt: serverTimestamp(),
+    });
+    __DEV__ && console.log("[createLiveBattle] success — battleId:", docRef.id);
+    return docRef.id;
+  } catch (err) {
+    console.error("[createLiveBattle] error:", err);
     throw err;
   }
 }
@@ -253,9 +336,12 @@ export async function createBattle(input: CreateBattleInput): Promise<string> {
 // privileges. The client never writes these protected fields itself, so
 // Firestore rules can (and do) reject any direct client attempt.
 
-export async function finalizeBattleStatsIfNeeded(battleId: string): Promise<void> {
+export async function finalizeBattleStatsIfNeeded(
+  battleId: string
+): Promise<FinalizeBattleResult> {
   try {
-    await finalizeBattleCallable({ battleId });
+    const result = await finalizeBattleCallable({ battleId });
+    return result.data;
   } catch (err) {
     // Surface the Firebase error code/message clearly so deploy/permission
     // problems are obvious in the logs. Common codes:
@@ -265,7 +351,16 @@ export async function finalizeBattleStatsIfNeeded(battleId: string): Promise<voi
     //   failed-precondition   → battle hasn't actually ended yet (benign)
     const code = (err as { code?: string })?.code ?? "unknown";
     const message = (err as { message?: string })?.message ?? String(err);
-    console.error(
+    // This failure is ALWAYS handled by the caller (Promise.allSettled + the
+    // non-blocking `finalizeWarning` banner), so log it as a warning rather than
+    // an error. console.error triggers React Native's full-screen red LogBox
+    // overlay in dev, which spams the screen once per completed battle when the
+    // deployed callable rejects (e.g. a v2/Cloud Run invoker-permission or
+    // App Check misconfiguration returns a platform-level 401 → `unauthenticated`
+    // BEFORE the function body runs — note the generic "unauthenticated" message
+    // instead of the function's own "You must be signed in."). Downgrading keeps
+    // the diagnostic in the logs without the disruptive overlay.
+    console.warn(
       `[finalizeBattle] callable failed — battleId=${battleId} code=${code} message=${message}`
     );
     // Re-throw a normalized error so callers can surface a UI warning without
@@ -280,7 +375,7 @@ export async function acceptChallenge(
   battleId: string,
   playerB: BattlePlayer
 ): Promise<void> {
-  console.log("[acceptChallenge] accepting —", {
+  __DEV__ && console.log("[acceptChallenge] accepting —", {
     battleId,
     playerB: { userId: playerB.userId, username: playerB.username,
                mediaType: playerB.mediaType, hasMedia: !!playerB.mediaUrl },
@@ -290,7 +385,7 @@ export async function acceptChallenge(
       playerB,
       status: "live",
     });
-    console.log("[acceptChallenge] success — battleId:", battleId);
+    __DEV__ && console.log("[acceptChallenge] success — battleId:", battleId);
   } catch (err) {
     console.error("[acceptChallenge] error — battleId:", battleId, err);
     throw err;
@@ -303,25 +398,13 @@ export async function submitVote(
   battleId: string,
   userId: string,
   side: "A" | "B"
-): Promise<void> {
-  const voteRef = doc(db, "votes", `${battleId}_${userId}`);
-  const battleRef = doc(db, "battles", battleId);
-
-  await runTransaction(db, async (tx) => {
-    const existing = await tx.get(voteRef);
-    if (existing.exists()) throw new Error("Already voted");
-
-    tx.set(voteRef, {
-      battleId,
-      userId,
-      side,
-      createdAt: serverTimestamp(),
-    });
-
-    tx.update(battleRef, {
-      [side === "A" ? "votesA" : "votesB"]: increment(1),
-    });
+): Promise<CastBattleVoteResult> {
+  const result = await castBattleVoteCallable({
+    battleId,
+    side,
+    clientMutationId: `${battleId}:${userId}`,
   });
+  return result.data;
 }
 
 // ─── Check if user has voted ──────────────────────────────────────────────────
@@ -340,16 +423,31 @@ export async function getUserVote(
 // restricted by project-level Firestore rules. A failure here must never
 // block the battles list from rendering.
 
-async function fetchVotedBattleIds(userId: string): Promise<Map<string, "A" | "B">> {
+async function fetchVotedBattleIds(
+  userId: string,
+  battleIds: string[]
+): Promise<Map<string, "A" | "B">> {
+  if (battleIds.length === 0) return new Map();
   try {
-    const snap = await getDocs(
-      query(collection(db, "votes"), where("userId", "==", userId))
+    const voteIds = battleIds.map((battleId) => `${battleId}_${userId}`);
+    const batches: string[][] = [];
+    for (let index = 0; index < voteIds.length; index += 10) {
+      batches.push(voteIds.slice(index, index + 10));
+    }
+    const snapshots = await Promise.all(
+      batches.map((ids) =>
+        getDocs(
+          query(collection(db, "votes"), where(documentId(), "in", ids))
+        )
+      )
     );
     const map = new Map<string, "A" | "B">();
-    snap.forEach((d) => {
-      const v = d.data() as Vote;
-      map.set(v.battleId, v.side);
-    });
+    snapshots.forEach((snapshot) =>
+      snapshot.forEach((d) => {
+        const v = d.data() as Vote;
+        map.set(v.battleId, v.side);
+      })
+    );
     return map;
   } catch {
     // Permission denied or collection missing — return empty map so battles load.
@@ -369,6 +467,8 @@ export function useBattles(currentUserId: string | null) {
   // the finalizeBattle Cloud Function is missing or permission-blocked). This
   // never prevents the battles list from rendering.
   const [finalizeWarning, setFinalizeWarning] = useState<string | null>(null);
+  const votedMapRef = useRef(votedMap);
+  votedMapRef.current = votedMap;
 
   const fetchBattles = useCallback(
     async (isRefresh = false) => {
@@ -378,32 +478,69 @@ export function useBattles(currentUserId: string | null) {
       setFinalizeWarning(null);
 
       try {
-        // fetchVotedBattleIds already handles its own errors and returns empty Map.
-        // Run both fetches concurrently; votes failure never blocks the list.
-        const [battlesSnap, voted] = await Promise.all([
-          getDocs(
-            query(collection(db, "battles"), orderBy("createdAt", "desc"))
-          ),
-          currentUserId
-            ? fetchVotedBattleIds(currentUserId)
-            : Promise.resolve(new Map<string, "A" | "B">()),
-        ]);
+        const battlesSnap = await getDocs(
+          query(
+            collection(db, "battles"),
+            orderBy("createdAt", "desc"),
+            limit(BATTLES_PAGE_SIZE)
+          )
+        );
 
         let fetched: Battle[] = battlesSnap.docs.map((d) =>
           normalizeBattle(d.id, d.data() as Record<string, unknown>)
         );
+        const voted = currentUserId
+          ? await fetchVotedBattleIds(
+              currentUserId,
+              fetched.map((battle) => battle.id)
+            )
+          : new Map<string, "A" | "B">();
 
         // Finalization is a server call that requires an authenticated user.
-        // Skip it entirely for signed-out viewers (the server would reject it).
-        const finalizable = currentUserId
+        // Gate on the live Firebase Auth user (auth.currentUser), not just the
+        // store's currentUserId: during the auth-restore window the store can
+        // already hold a userId while auth.currentUser is still null and no ID
+        // token exists, which makes the callable fail with
+        // `functions/unauthenticated`. Skipping here prevents that call entirely
+        // for signed-out viewers and during that startup gap.
+        const authedUser = auth.currentUser;
+        const finalizable = currentUserId && authedUser
           ? fetched.filter(
               (battle) =>
                 getBattleStatus(battle) === "completed" && !battle.statsRecorded
+                // Session guard: never re-attempt a battle already tried this
+                // session (survives remounts/focus), until auth changes or a
+                // manual refresh clears the guard.
+                && !sessionFinalizeGuard.has(battle.id)
             )
           : [];
 
-        if (finalizable.length > 0) {
-          console.log("[battleStats] finalizing ended battles:", finalizable.map((b) => b.id));
+        // Ensure a valid ID token is actually available before invoking the
+        // callable. On cold start the user is restored from AsyncStorage
+        // persistence (auth.currentUser becomes non-null) BEFORE an ID token has
+        // been fetched, so the callable would reach the server with no auth
+        // context and be rejected as `functions/unauthenticated`. Awaiting
+        // getIdToken() forces the token to be fetched/cached so the callable can
+        // attach it. If a token can't be obtained we skip finalize this pass
+        // WITHOUT marking the battles attempted, so the next refresh / auth
+        // change retries cleanly once the token is ready (no error spam).
+        let finalizeTokenReady = false;
+        if (finalizable.length > 0 && authedUser) {
+          try {
+            finalizeTokenReady = !!(await authedUser.getIdToken());
+          } catch {
+            finalizeTokenReady = false;
+          }
+        }
+
+        if (finalizable.length > 0 && finalizeTokenReady) {
+          // Mark as attempted BEFORE awaiting so a concurrent/refocus fetch
+          // can't fire the same finalize call in parallel. On an
+          // `unauthenticated` (or any) failure the id stays in the guard, so we
+          // stop retrying it until auth changes or a manual refresh.
+          finalizable.forEach((battle) =>
+            sessionFinalizeGuard.add(battle.id)
+          );
           const results = await Promise.allSettled(
             finalizable.map((battle) => finalizeBattleStatsIfNeeded(battle.id))
           );
@@ -419,18 +556,6 @@ export function useBattles(currentUserId: string | null) {
                 (r.result.reason as { code?: string })?.code !== "failed-precondition"
             );
 
-          results.forEach((result, index) => {
-            if (result.status === "rejected") {
-              const reason = result.reason as { code?: string; message?: string };
-              console.error(
-                "[battleStats] finalize failed:",
-                finalizable[index]?.id,
-                reason?.code ?? "unknown",
-                reason?.message ?? reason
-              );
-            }
-          });
-
           if (realFailures.length > 0) {
             const reason = realFailures[0].result.reason as { code?: string; message?: string };
             const code = reason?.code ?? "error";
@@ -440,12 +565,24 @@ export function useBattles(currentUserId: string | null) {
             );
           }
 
-          const refreshedSnap = await getDocs(
-            query(collection(db, "battles"), orderBy("createdAt", "desc"))
+          const finalizedById = new Map(
+            results.flatMap((result, index) =>
+              result.status === "fulfilled"
+                ? [[finalizable[index].id, result.value] as const]
+                : []
+            )
           );
-          fetched = refreshedSnap.docs.map((d) =>
-            normalizeBattle(d.id, d.data() as Record<string, unknown>)
-          );
+          fetched = fetched.map((battle) => {
+            const result = finalizedById.get(battle.id);
+            return result
+              ? {
+                  ...battle,
+                  status: "completed",
+                  statsRecorded: true,
+                  winner: result.winner,
+                }
+              : battle;
+          });
         }
 
         setBattles(fetched);
@@ -471,20 +608,29 @@ export function useBattles(currentUserId: string | null) {
     fetchBattles();
   }, [fetchBattles]);
 
+  // When the signed-in user changes (sign-in / sign-out / account switch) reset
+  // the session finalize guard so battles can be legitimately re-attempted under
+  // the new auth context. This is the "until auth changes" recovery path for a
+  // battle that previously failed with `unauthenticated`.
+  useEffect(() => {
+    clearFinalizeGuard();
+  }, [currentUserId]);
+
   // Optimistic vote — returns true on Firestore success, false if already voted or error
   const handleVote = useCallback(
     async (battleId: string, side: "A" | "B"): Promise<boolean> => {
       if (!currentUserId) return false;
-      if (votedMap.has(battleId)) {
+      if (votedMapRef.current.has(battleId)) {
         console.warn("[voteBattle] already voted — battleId:", battleId);
         return false;
       }
 
-      console.log("[voteBattle] voting — battleId:", battleId, "side:", side, "userId:", currentUserId);
+      __DEV__ && console.log("[voteBattle] voting — battleId:", battleId, "side:", side, "userId:", currentUserId);
 
       // Optimistic update
-      const nextVoted = new Map(votedMap);
+      const nextVoted = new Map(votedMapRef.current);
       nextVoted.set(battleId, side);
+      votedMapRef.current = nextVoted;
       setVotedMap(nextVoted);
       setBattles((prev) =>
         prev.map((b) =>
@@ -499,13 +645,29 @@ export function useBattles(currentUserId: string | null) {
       );
 
       try {
-        await submitVote(battleId, currentUserId, side);
-        console.log("[voteBattle] success — battleId:", battleId, "side:", side);
+        const result = await submitVote(battleId, currentUserId, side);
+        setBattles((prev) =>
+          prev.map((battle) =>
+            battle.id === battleId
+              ? {
+                  ...battle,
+                  votesA: result.votesA,
+                  votesB: result.votesB,
+                }
+              : battle
+          )
+        );
+        __DEV__ && console.log("[voteBattle] success — battleId:", battleId, "side:", side);
         return true;
       } catch (err) {
         console.error("[voteBattle] error — reverting — battleId:", battleId, err);
         // Revert
-        setVotedMap(votedMap);
+        setVotedMap((current) => {
+          const reverted = new Map(current);
+          reverted.delete(battleId);
+          votedMapRef.current = reverted;
+          return reverted;
+        });
         setBattles((prev) =>
           prev.map((b) =>
             b.id === battleId
@@ -520,13 +682,24 @@ export function useBattles(currentUserId: string | null) {
         return false;
       }
     },
-    [currentUserId, votedMap]
+    [currentUserId]
   );
 
   // Stable refresh reference — only recreates when fetchBattles changes (i.e.
   // when currentUserId changes). Prevents useFocusEffect / RefreshControl from
   // getting a new function reference each render and triggering a loop.
+  // NOTE: this is what `useFocusEffect` uses, so it must NOT clear the finalize
+  // guard — otherwise every tab focus would re-arm the finalize calls.
   const refresh = useCallback(() => fetchBattles(true), [fetchBattles]);
+
+  // Explicit user-initiated refresh (pull-to-refresh / Retry). Unlike focus
+  // refresh, this clears the session finalize guard first so a previously
+  // failed finalization (e.g. one that hit `unauthenticated` mid-startup) can
+  // be retried on demand.
+  const manualRefresh = useCallback(() => {
+    clearFinalizeGuard();
+    return fetchBattles(true);
+  }, [fetchBattles]);
 
   return {
     battles,
@@ -536,6 +709,7 @@ export function useBattles(currentUserId: string | null) {
     error,
     finalizeWarning,
     refresh,
+    manualRefresh,
     handleVote,
   };
 }

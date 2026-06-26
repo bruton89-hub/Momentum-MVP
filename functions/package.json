@@ -9,6 +9,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:watch": "tsc -p tsconfig.json --watch",
+    "test:contracts": "node --test test",
     "serve": "npm run build && firebase emulators:start --only functions",
     "shell": "npm run build && firebase functions:shell",
     "deploy": "firebase deploy --only functions",

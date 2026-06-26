@@ -1,0 +1,16 @@
+{
+  "name": "momentum-video-renderer",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": "20"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@google-cloud/storage": "^7.16.0",
+    "express": "^4.21.2",
+    "firebase-admin": "^13.0.2"
+  }
+}

@@ -21,7 +21,7 @@ export default {
       bundleIdentifier: "com.momentumapp.sports",
       buildNumber: "24",
       supportsTablet: false,
-      googleServicesFile: "./GoogleService-Info.plist",
+      googleServicesFile: process.env.IOS_GOOGLE_SERVICES_FILE || "./GoogleService-Info.plist",
       infoPlist: {
         ITSAppUsesNonExemptEncryption: false,
         NSPhotoLibraryUsageDescription:
@@ -35,7 +35,7 @@ export default {
     android: {
       package: "com.momentumapp.mvp",
       versionCode: 24,
-      googleServicesFile: "./google-services.json",
+      googleServicesFile: process.env.ANDROID_GOOGLE_SERVICES_FILE || "./google-services.json",
       adaptiveIcon: {
         // Dedicated adaptive icon — foreground drawn on top of backgroundColor.
         // Using a separate file from icon.png allows Android to apply its own
@@ -65,7 +65,9 @@ export default {
     },
     extra: {
       eas: {
-        projectId: "4148ae9f-36be-4364-aa69-09cbf0ead6ae",
+        projectId:
+          process.env.EAS_PROJECT_ID ||
+          "4148ae9f-36be-4364-aa69-09cbf0ead6ae",
       },
     },
   },

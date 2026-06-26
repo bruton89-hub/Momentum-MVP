@@ -1,11 +1,11 @@
-# Momentum MVP — Setup & Launch Guide
+# Momentum MVP - Setup & Launch Guide
 
 ## Prerequisites
 - Node.js 18+
-- Expo CLI: `npm install -g expo-cli`
-- EAS CLI: `npm install -g eas-cli`
+- Expo CLI through `npx expo`
+- EAS CLI: `npm install -g eas-cli` if you build with EAS
 - Xcode 15+ (for iOS / TestFlight)
-- Firebase project: `momentum-live-483819` (already configured)
+- Firebase project with Auth, Firestore, Storage, and Functions enabled
 
 ---
 
@@ -26,19 +26,19 @@ Copy `.env.example` to `.env`:
 cp .env.example .env
 ```
 
-The `.env.example` already contains the correct values for the existing
-`momentum-live-483819` Firebase project. No changes needed unless you
-want a separate Firebase project.
+Fill `.env` with your own Firebase Web App config from Firebase Console.
+Do not commit `.env`.
 
 ---
 
 ## Step 3 — Firebase Service Files
 
-Copy from `momentum-mobile-v3` (same project):
+Download these from Firebase Console for your iOS and Android apps:
 
 ```bash
-cp ../momentum-mobile-v3/GoogleService-Info.plist ./GoogleService-Info.plist
-cp ../momentum-mobile-v3/google-services.json ./google-services.json
+# keep both files local; they are ignored by Git
+GoogleService-Info.plist
+google-services.json
 ```
 
 ---
@@ -48,8 +48,9 @@ cp ../momentum-mobile-v3/google-services.json ./google-services.json
 Deploy the Firestore rules and indexes:
 
 ```bash
-npx firebase deploy --only firestore:rules --project momentum-live-483819
-npx firebase deploy --only firestore:indexes --project momentum-live-483819
+npx firebase deploy --only firestore:rules --project "$FIREBASE_PROJECT_ID"
+npx firebase deploy --only firestore:indexes --project "$FIREBASE_PROJECT_ID"
+npx firebase deploy --only storage --project "$FIREBASE_PROJECT_ID"
 ```
 
 ---
@@ -63,7 +64,7 @@ npm start
 # Or run directly on iOS simulator
 npm run ios
 
-# Scan QR with Expo Go on device
+# Scan the QR code with Expo Go on a device
 ```
 
 ---
@@ -126,14 +127,9 @@ Profile → Stats (Posts / Wins / Losses)
 
 ## Assets Required
 
-Before building for TestFlight, add these to `assets/`:
+Before building for TestFlight, confirm these exist in `assets/`:
 - `icon.png` — 1024×1024 app icon (black bg, neon green ⚡)
 - `splash.png` — 1242×2436 splash screen
-
-You can copy from `momentum-mobile-v3/assets/` for now:
-```bash
-cp -r ../momentum-mobile-v3/assets ./assets
-```
 
 ---
 
@@ -142,8 +138,8 @@ cp -r ../momentum-mobile-v3/assets ./assets
 - No push notifications
 - No in-app messaging
 - No leaderboards or XP
-- Battle winner calculated client-side (by vote count at expiry)
-- No Cloud Functions for battle settlement — add post-MVP
+- Battle settlement, votes, and likes require deployed Cloud Functions.
+- App Check enforcement remains a post-validation release hardening step.
 
 ---
 

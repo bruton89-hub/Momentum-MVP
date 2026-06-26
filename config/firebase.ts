@@ -5,14 +5,48 @@ import { getFunctions } from "firebase/functions";
 import { getStorage } from "firebase/storage";
 import { Platform } from "react-native";
 
+function requiredEnv(name: string, value: string | undefined): string {
+  if (!value?.trim()) {
+    throw new Error(
+      `Missing ${name}. Configure the Firebase Web App environment before starting Momentum.`
+    );
+  }
+  return value;
+}
+
 const firebaseConfig = {
-  apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY,
-  authDomain: process.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN,
-  projectId: process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID,
-  storageBucket: process.env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: process.env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-  appId: process.env.EXPO_PUBLIC_FIREBASE_APP_ID,
+  apiKey: requiredEnv(
+    "EXPO_PUBLIC_FIREBASE_API_KEY",
+    process.env.EXPO_PUBLIC_FIREBASE_API_KEY
+  ),
+  authDomain: requiredEnv(
+    "EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN",
+    process.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN
+  ),
+  projectId: requiredEnv(
+    "EXPO_PUBLIC_FIREBASE_PROJECT_ID",
+    process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID
+  ),
+  storageBucket: requiredEnv(
+    "EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET",
+    process.env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET
+  ),
+  messagingSenderId: requiredEnv(
+    "EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID",
+    process.env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
+  ),
+  appId: requiredEnv(
+    "EXPO_PUBLIC_FIREBASE_APP_ID",
+    process.env.EXPO_PUBLIC_FIREBASE_APP_ID
+  ),
 };
+
+const expectedProjectId = process.env.EXPO_PUBLIC_EXPECTED_FIREBASE_PROJECT_ID;
+if (expectedProjectId && firebaseConfig.projectId !== expectedProjectId) {
+  throw new Error(
+    `Firebase project mismatch: expected ${expectedProjectId}, received ${firebaseConfig.projectId}.`
+  );
+}
 
 export const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 

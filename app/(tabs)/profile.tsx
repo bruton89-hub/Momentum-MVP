@@ -618,7 +618,7 @@ export default function ProfileScreen() {
             <View style={styles.identityRow}>
               {/* Avatar with neon ring */}
               <View style={styles.avatarRingWrap}>
-                <AvatarImage uri={profile.avatar} username={profile.username} size={80} />
+                <AvatarImage uri={profile.avatar} username={profile.username} size={104} />
               </View>
               <View style={styles.identityText}>
                 <Text style={styles.username}>{profile.username}</Text>
@@ -803,10 +803,10 @@ const styles = StyleSheet.create({
     gap: SPACING.lg,
   },
   avatarRingWrap: {
-    borderRadius: 46,
+    borderRadius: 56,
     borderWidth: 3,
     borderColor: COLORS.accent,
-    padding: 2,
+    padding: 1,
     overflow: "hidden",
   },
   identityText: { flex: 1 },
@@ -814,6 +814,7 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
     fontSize: 24,
     fontWeight: FONTS.heavy,
+    letterSpacing: 0.3,
     marginBottom: 3,
   },
   handle: {
@@ -866,14 +867,23 @@ const styles = StyleSheet.create({
   },
   sport: {
     color: COLORS.accent,
-    fontSize: 14,
-    fontWeight: FONTS.semibold,
+    fontSize: 13,
+    fontWeight: FONTS.bold,
     textAlign: "center",
+    alignSelf: "center",
+    backgroundColor: COLORS.accentFaint,
+    borderWidth: 1,
+    borderColor: COLORS.accent,
+    borderRadius: RADIUS.full,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: 3,
+    overflow: "hidden",
+    marginBottom: 2,
   },
   bio: {
     color: COLORS.textSecondary,
     fontSize: 13,
-    lineHeight: 19,
+    lineHeight: 20,
     textAlign: "center",
   },
 
@@ -903,14 +913,15 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontSize: 14,
     fontWeight: FONTS.bold,
+    letterSpacing: 0.2,
   },
   tabTextActive: { color: COLORS.textPrimary },
   tabUnderline: {
     width: "80%",
-    height: 2,
-    borderRadius: 2,
+    height: 3,
+    borderRadius: 3,
     backgroundColor: COLORS.transparent,
-    marginTop: SPACING.sm,
+    marginTop: SPACING.sm + 2,
   },
   tabUnderlineActive: { backgroundColor: COLORS.accent },
 

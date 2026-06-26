@@ -503,9 +503,10 @@ const styles = StyleSheet.create({
   },
   playerName: {
     color: COLORS.textPrimary,
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: FONTS.bold,
     textAlign: "center",
+    letterSpacing: 0.2,
   },
   playerHandle: {
     color: COLORS.textHandle,
@@ -593,7 +594,7 @@ const styles = StyleSheet.create({
   voteBarTotal: { color: COLORS.textMuted, fontSize: 11 },
   voteBarTrack: {
     flexDirection: "row",
-    height: 10,
+    height: 12,
     borderRadius: RADIUS.full,
     overflow: "hidden",
     backgroundColor: COLORS.surface,

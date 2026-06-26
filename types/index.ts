@@ -1,4 +1,7 @@
 import type { Timestamp } from "firebase/firestore";
+import type {
+  PostVideoEdit,
+} from "@/constants/videoEditing";
 
 // ─── User ─────────────────────────────────────────────────────────────────────
 
@@ -30,6 +33,8 @@ export interface Post {
   caption: string;
   likesCount: number;
   battleEnabled: boolean;
+  originalMediaUrl?: string;
+  videoEdit?: PostVideoEdit;
   createdAt: Timestamp | null;
 }
 

@@ -46,7 +46,7 @@ const readline = require("readline");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const PROJECT_ID = "momentum-app-prod-1e870";
+const PROJECT_ID = process.env.FIREBASE_PROJECT_ID;
 
 const SERVICE_ACCOUNT_PATH = path.join(__dirname, "serviceAccountKey.json");
 
@@ -59,6 +59,16 @@ const DELETE_BATCH_SIZE = 400;
 const DRY_RUN = process.env.DRY_RUN === "true";
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
+
+if (!PROJECT_ID) {
+  console.error(`
+ERROR: FIREBASE_PROJECT_ID is required.
+
+Set it in your shell before running this script:
+  FIREBASE_PROJECT_ID=your-project-id node scripts/cleanup-firestore.js
+`);
+  process.exit(1);
+}
 
 if (!fs.existsSync(SERVICE_ACCOUNT_PATH)) {
   console.error(`

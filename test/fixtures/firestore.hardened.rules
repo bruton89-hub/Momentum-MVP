@@ -1,0 +1,79 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+    function changedKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create: if isOwner(userId);
+      allow update: if isOwner(userId)
+        && changedKeys().hasOnly([
+          'bio',
+          'sport',
+          'athleteType',
+          'avatar',
+          'avatarUrl',
+          'updatedAt'
+        ]);
+    }
+
+    match /posts/{postId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid;
+      allow update: if isOwner(resource.data.userId)
+        && changedKeys().hasOnly(['caption', 'battleEnabled', 'updatedAt'])
+        && request.resource.data.likesCount == resource.data.likesCount
+        && request.resource.data.userId == resource.data.userId;
+      allow delete: if isOwner(resource.data.userId);
+    }
+
+    match /likes/{likeId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if false;
+    }
+
+    match /battles/{battleId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.creatorId == request.auth.uid;
+
+      function isAcceptingChallenge() {
+        return resource.data.status == 'open'
+          && request.resource.data.status == 'live'
+          && changedKeys().hasOnly(['playerB', 'status'])
+          && request.resource.data.playerB.userId == request.auth.uid
+          && resource.data.creatorId != request.auth.uid;
+      }
+
+      allow update: if isSignedIn() && isAcceptingChallenge();
+    }
+
+    match /votes/{voteId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if false;
+    }
+
+    match /follows/{followId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.followerId == request.auth.uid
+        && followId == (request.auth.uid + '_' + request.resource.data.followingId);
+      allow delete: if isSignedIn()
+        && resource.data.followerId == request.auth.uid;
+    }
+
+    match /usernames/{normalizedUsername} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if false;
+    }
+  }
+}
