@@ -456,8 +456,12 @@ async function fetchVotedBattleIds(
 }
 
 // ─── Hook: battles list ───────────────────────────────────────────────────────
+// `includeVotes` (default true): when false, skips the fetchVotedBattleIds
+// lookups (up to 3 `in` queries / 30 doc reads per fetch). Pass false from
+// screens that never render or cast votes (profile battle-history lists) —
+// votedMap will stay empty there, which those screens already ignore.
 
-export function useBattles(currentUserId: string | null) {
+export function useBattles(currentUserId: string | null, includeVotes = true) {
   const [battles, setBattles] = useState<Battle[]>([]);
   const [votedMap, setVotedMap] = useState<Map<string, "A" | "B">>(new Map());
   const [loading, setLoading] = useState(true);
@@ -489,7 +493,7 @@ export function useBattles(currentUserId: string | null) {
         let fetched: Battle[] = battlesSnap.docs.map((d) =>
           normalizeBattle(d.id, d.data() as Record<string, unknown>)
         );
-        const voted = currentUserId
+        const voted = currentUserId && includeVotes
           ? await fetchVotedBattleIds(
               currentUserId,
               fetched.map((battle) => battle.id)
@@ -601,7 +605,7 @@ export function useBattles(currentUserId: string | null) {
         setRefreshing(false);
       }
     },
-    [currentUserId]
+    [currentUserId, includeVotes]
   );
 
   useEffect(() => {

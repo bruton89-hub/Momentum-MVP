@@ -1,187 +1,39 @@
-import React, { useMemo, useState } from "react";
-import {
-  View,
-  Text,
-  FlatList,
-  Modal,
-  StyleSheet,
-  Pressable,
-  Dimensions,
-} from "react-native";
+import React, { useCallback, useMemo, useState } from "react";
+import { View, StyleSheet, Alert, Platform } from "react-native";
 import { useLocalSearchParams, useRouter, Redirect } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { openAthleteProfile } from "@/utils/navigation";
+import Animated, {
+  useSharedValue,
+  useAnimatedScrollHandler,
+} from "react-native-reanimated";
 import { useAuthStore } from "@/store/authStore";
 import { useProfile } from "@/hooks/useProfile";
 import { useUserPosts } from "@/hooks/usePosts";
 import { useBattles } from "@/hooks/useBattles";
 import { useFollows } from "@/hooks/useFollows";
-import { COLORS, SPACING, RADIUS, FONTS } from "@/constants/theme";
-import AvatarImage from "@/components/AvatarImage";
-import GlowButton from "@/components/GlowButton";
+import { COLORS, SPACING, TRENDING_LIKES_THRESHOLD } from "@/constants/theme";
+import { isVideoMedia } from "@/utils/media";
 import EmptyState from "@/components/EmptyState";
 import LoadingSpinner from "@/components/LoadingSpinner";
-import MediaTile from "@/components/MediaTile";
-import PostCard from "@/components/PostCard";
+import IconButton from "@/components/IconButton";
+import ProfileHeader from "@/components/ProfileHeader";
+import ProfileTabs, { ProfileTabDef } from "@/components/ProfileTabs";
+import ProfileCompactBar, { COMPACT_BAR_HEIGHT } from "@/components/ProfileCompactBar";
+import ProfileGridSkeleton from "@/components/ProfileGridSkeleton";
+import PostGridThumb from "@/components/PostGridThumb";
+import BattleHistoryCard from "@/components/BattleHistoryCard";
+import PostDetailModal from "@/components/PostDetailModal";
 import BattlePickerModal from "@/components/BattlePickerModal";
-import type { Battle, Post, UserProfile } from "@/types";
+import type { Battle, Post } from "@/types";
 
-const SCREEN_W = Dimensions.get("window").width;
-type ProfileTab = "posts" | "battles" | "saved";
+type ProfileTab = "posts" | "highlights" | "battles" | "saved";
 
-// ─── PostThumb — uses MediaTile for native-safe rendering ────────────────────
-function PostThumb({ post, onPress }: { post: Post; onPress: () => void }) {
-  const SIZE = (SCREEN_W - SPACING.lg * 2 - SPACING.sm * 2) / 3;
-  const thumbStyle = { width: SIZE, height: SIZE, borderRadius: RADIUS.sm } as const;
-  return (
-    <Pressable style={{ position: "relative" }} onPress={onPress}>
-      <MediaTile
-        uri={post.mediaUrl || null}
-        mediaType={post.mediaType}
-        style={thumbStyle}
-        context="PlayerProfileGrid"
-      />
-      {post.mediaType === "video" && (
-        <View style={styles.videoBadge}>
-          <Text style={styles.videoBadgeText}>VIDEO</Text>
-        </View>
-      )}
-    </Pressable>
-  );
-}
-
-function PostDetailModal({
-  post,
-  visible,
-  onClose,
-  currentUserId,
-  isFollowing,
-  onFollow,
-  onBattle,
-}: {
-  post: Post | null;
-  visible: boolean;
-  onClose: () => void;
-  currentUserId: string | null;
-  isFollowing: boolean;
-  onFollow: (userId: string, isCurrentlyFollowing: boolean) => void;
-  onBattle: (post: Post) => void;
-}) {
-  if (!post) return null;
-
-  return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <SafeAreaView style={styles.postModalSafe} edges={["top"]}>
-        <View style={styles.postModalTopBar}>
-          <Pressable
-            onPress={onClose}
-            style={styles.backBtn}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          >
-            <Text style={styles.backIcon}>‹</Text>
-          </Pressable>
-        </View>
-        <PostCard
-          post={post}
-          isLiked={false}
-          onLike={() => undefined}
-          currentUserId={currentUserId}
-          isFollowing={isFollowing}
-          onFollow={onFollow}
-          onBattle={onBattle}
-          enableVideoPlayback
-          isActiveVideo
-        />
-      </SafeAreaView>
-    </Modal>
-  );
-}
-
-// ─── BattleHistoryCard (same layout as own profile) ───────────────────────────
-function formatBattleDate(value: Battle["createdAt"]) {
-  if (!value) return "Recent";
-  const date =
-    typeof value.toDate === "function"
-      ? value.toDate()
-      : new Date(
-          (value as { seconds?: number }).seconds
-            ? (value as { seconds: number }).seconds * 1000
-            : Date.now()
-        );
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
-
-function BattleHistoryCard({
-  battle,
-  userId,
-  currentUserId,
-}: {
-  battle: Battle;
-  userId: string;
-  currentUserId: string | null;
-}) {
-  const router = useRouter();
-  const mine = battle.playerA?.userId === userId ? battle.playerA : battle.playerB;
-  const opponent = battle.playerA?.userId === userId ? battle.playerB : battle.playerA;
-  const result = battle.winner
-    ? battle.winner === userId
-      ? "WIN"
-      : "LOSS"
-    : battle.status.toUpperCase();
-  const resultStyle =
-    result === "WIN"
-      ? styles.resultWin
-      : result === "LOSS"
-      ? styles.resultLoss
-      : styles.resultLive;
-  const date = formatBattleDate(battle.createdAt);
-
-  return (
-    <View style={styles.battleCard}>
-      {/* MediaTile fills the 68×68 battleThumb container safely on iOS */}
-      <MediaTile
-        uri={mine?.mediaUrl || null}
-        mediaType={mine?.mediaType}
-        style={styles.battleThumb}
-        context="PlayerProfileBattleHistory"
-      />
-      <View style={styles.battleInfo}>
-        <View style={styles.battleMetaRow}>
-          <Text style={[styles.resultPill, resultStyle]}>{result}</Text>
-          <Text style={styles.battleDate}>{date}</Text>
-        </View>
-        <Text style={styles.battleTitle} numberOfLines={1}>
-          {battle.category || "Battle"}
-        </Text>
-        {/* Opponent name — tappable to navigate to their profile */}
-        {opponent?.userId ? (
-          <Pressable
-            onPress={() => openAthleteProfile(router, opponent!.userId, currentUserId)}
-            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-          >
-            <Text style={[styles.battleOpponent, styles.battleOpponentLink]} numberOfLines={1}>
-              vs {opponent.username}
-            </Text>
-          </Pressable>
-        ) : (
-          <Text style={styles.battleOpponent} numberOfLines={1}>
-            vs {opponent?.username || "Open challenge"}
-          </Text>
-        )}
-      </View>
-    </View>
-  );
-}
-
-// ─── Stat cell ────────────────────────────────────────────────────────────────
-function Stat({ label, value }: { label: string; value: number }) {
-  return (
-    <View style={styles.stat}>
-      <Text style={styles.statValue}>{value}</Text>
-      <Text style={styles.statLabel}>{label}</Text>
-    </View>
-  );
-}
+const PROFILE_TABS: readonly ProfileTabDef<ProfileTab>[] = [
+  { key: "posts", label: "Posts", icon: "grid" },
+  { key: "highlights", label: "Highlights", icon: "play" },
+  { key: "battles", label: "Battles", icon: "zap" },
+  { key: "saved", label: "Saved", icon: "bookmark" },
+];
 
 // ─── Player Profile Screen ────────────────────────────────────────────────────
 export default function PlayerProfileScreen() {
@@ -196,19 +48,23 @@ export default function PlayerProfileScreen() {
 
   const { profile, loading: profileLoading, error: profileError } = useProfile(targetUserId);
   const { posts, loading: postsLoading } = useUserPosts(targetUserId);
-  // Use currentUserId (viewer) so the votedMap reflects the viewer's own votes,
-  // not the profile owner's votes. The battles list is identical either way since
-  // useBattles always fetches all battles regardless of the passed userId.
-  const { battles, loading: battlesLoading } = useBattles(currentUserId);
+  // includeVotes=false: this screen only renders battle history rows and never
+  // shows or casts votes, so skip the votedMap lookups (3 Firestore `in`
+  // queries per visit). The battles list itself is user-independent.
+  const { battles, loading: battlesLoading } = useBattles(currentUserId, false);
   const { followedIds, follow, unfollow } = useFollows(currentUserId);
 
   const [activeTab, setActiveTab] = useState<ProfileTab>("posts");
   const [selectedPost, setSelectedPost] = useState<Post | null>(null);
   const [challengeTargetPost, setChallengeTargetPost] = useState<Post | null>(null);
 
-  const isFollowing = !!targetUserId && followedIds.has(targetUserId);
+  // Collapsing header — scroll offset lives on the UI thread only.
+  const scrollY = useSharedValue(0);
+  const scrollHandler = useAnimatedScrollHandler((event) => {
+    scrollY.value = event.contentOffset.y;
+  });
 
-  const profileHandle = `@${profile?.username?.trim().toLowerCase().replace(/\s+/g, "") || "player"}`;
+  const isFollowing = !!targetUserId && followedIds.has(targetUserId);
 
   const profileBattles = useMemo(
     () =>
@@ -221,14 +77,36 @@ export default function PlayerProfileScreen() {
     [battles, targetUserId]
   );
 
-  const listData =
-    activeTab === "posts" ? posts : activeTab === "battles" ? profileBattles : [];
+  // ── Derived lists (memoized — no extra queries) ─────────────────────────────
+  const sortedPosts = useMemo(() => {
+    const pinned = posts.filter((p) => p.pinned);
+    if (pinned.length === 0) return posts;
+    return [...pinned, ...posts.filter((p) => !p.pinned)];
+  }, [posts]);
 
-  const tabs: { key: ProfileTab; label: string }[] = [
-    { key: "posts", label: "Posts" },
-    { key: "battles", label: "Battles" },
-    { key: "saved", label: "Saved" },
-  ];
+  const highlightPosts = useMemo(
+    () => sortedPosts.filter((p) => isVideoMedia(p.mediaUrl, p.mediaType)),
+    [sortedPosts]
+  );
+
+  const hasTrendingPost = useMemo(
+    () => posts.some((p) => p.likesCount >= TRENDING_LIKES_THRESHOLD),
+    [posts]
+  );
+
+  const handleTabChange = useCallback(
+    (tab: ProfileTab) => {
+      scrollY.value = 0; // list remounts at top; keep the compact bar in sync
+      setActiveTab(tab);
+    },
+    [scrollY]
+  );
+
+  const handleFollowToggle = useCallback(() => {
+    if (!targetUserId || !currentUserId) return;
+    if (isFollowing) unfollow(targetUserId);
+    else follow(targetUserId);
+  }, [targetUserId, currentUserId, isFollowing, follow, unfollow]);
 
   function handleFollow(targetId: string, isCurrentlyFollowing: boolean) {
     if (!currentUserId) return;
@@ -239,6 +117,33 @@ export default function PlayerProfileScreen() {
   function handleBattle(post: Post) {
     if (!currentUserId) return;
     setChallengeTargetPost(post);
+  }
+
+  // Header CHALLENGE — target the athlete's most recent highlight.
+  const handleHeaderChallenge = useCallback(() => {
+    if (!currentUserId) return;
+    const target = sortedPosts[0];
+    if (!target) {
+      Alert.alert(
+        "No highlights yet",
+        "This athlete hasn't posted a highlight to challenge."
+      );
+      return;
+    }
+    setChallengeTargetPost(target);
+  }, [currentUserId, sortedPosts]);
+
+  const handleMessage = useCallback(() => {
+    if (Platform.OS === "web") {
+      if (typeof window !== "undefined") window.alert("Messaging is coming soon.");
+      return;
+    }
+    Alert.alert("Messaging", "Messaging is coming soon.");
+  }, []);
+
+  function goBack() {
+    if (router.canGoBack()) router.back();
+    else router.navigate("/(tabs)" as never);
   }
 
   // ── Redirect own profile to the tab so the tab bar is visible and there
@@ -267,14 +172,13 @@ export default function PlayerProfileScreen() {
   if (profileError || !profile) {
     return (
       <SafeAreaView style={styles.safe} edges={["top"]}>
-        <View style={styles.topBar}>
-          <Pressable
-            onPress={() => router.canGoBack() ? router.back() : router.navigate("/(tabs)" as never)}
-            style={styles.backBtn}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          >
-            <Text style={styles.backIcon}>‹</Text>
-          </Pressable>
+        <View style={styles.fallbackTopBar}>
+          <IconButton
+            icon="chevron-left"
+            accessibilityLabel="Go back"
+            onPress={goBack}
+            color={COLORS.textPrimary}
+          />
         </View>
         <EmptyState
           icon="👤"
@@ -285,119 +189,78 @@ export default function PlayerProfileScreen() {
     );
   }
 
+  const isGridTab = activeTab === "posts" || activeTab === "highlights";
+  const listData: (Post | Battle)[] =
+    activeTab === "posts"
+      ? sortedPosts
+      : activeTab === "highlights"
+      ? highlightPosts
+      : activeTab === "battles"
+      ? profileBattles
+      : [];
+
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <FlatList<Post | Battle>
+      <Animated.FlatList
         key={activeTab}
-        data={listData as (Post | Battle)[]}
-        keyExtractor={(item) => item.id}
-        numColumns={activeTab === "posts" ? 3 : 1}
-        columnWrapperStyle={activeTab === "posts" ? { gap: SPACING.sm } : undefined}
+        data={listData}
+        keyExtractor={(item: Post | Battle) => item.id}
+        numColumns={isGridTab ? 3 : 1}
+        columnWrapperStyle={isGridTab ? { gap: SPACING.sm } : undefined}
         contentContainerStyle={styles.grid}
-        renderItem={({ item }) =>
-          activeTab === "posts" ? (
-            <PostThumb post={item as Post} onPress={() => setSelectedPost(item as Post)} />
+        initialNumToRender={isGridTab ? 15 : 8}
+        windowSize={9}
+        onScroll={scrollHandler}
+        scrollEventThrottle={16}
+        renderItem={({ item }: { item: Post | Battle }) =>
+          isGridTab ? (
+            <PostGridThumb
+              post={item as Post}
+              onPress={() => setSelectedPost(item as Post)}
+              context="PlayerProfileGrid"
+            />
           ) : (
-            <BattleHistoryCard battle={item as Battle} userId={targetUserId} currentUserId={currentUserId} />
+            <BattleHistoryCard
+              battle={item as Battle}
+              userId={targetUserId}
+              currentUserId={currentUserId}
+              context="PlayerProfileBattleHistory"
+            />
           )
         }
         ListHeaderComponent={
-          <View style={styles.profileHeader}>
-            {/* ── Top bar: back button ──────────────────────────────────────── */}
-            <View style={styles.topBar}>
-              <Pressable
-                onPress={() => router.canGoBack() ? router.back() : router.navigate("/(tabs)" as never)}
-                style={styles.backBtn}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              >
-                <Text style={styles.backIcon}>‹</Text>
-              </Pressable>
-            </View>
-
-            {/* ── Identity: avatar + name/handle ───────────────────────────── */}
-            <View style={styles.identityRow}>
-              <View style={styles.avatarRingWrap}>
-                <AvatarImage uri={profile.avatar} username={profile.username} size={80} />
-              </View>
-              <View style={styles.identityText}>
-                <Text style={styles.username}>{profile.username}</Text>
-                <Text style={styles.handle}>{profileHandle}</Text>
-              </View>
-            </View>
-
-            {/* ── Stats row ────────────────────────────────────────────────── */}
-            {/* posts.length mirrors the grid exactly; profile.posts is stale
-                because Firestore rules block client-side counter increments. */}
-            <View style={styles.statsRow}>
-              <Stat label="Posts" value={posts.length} />
-              <View style={styles.statDivider} />
-              <Stat label="Wins" value={profile.wins} />
-              <View style={styles.statDivider} />
-              <Stat label="Losses" value={profile.losses} />
-            </View>
-
-            {/* ── Bio / sport ──────────────────────────────────────────────── */}
-            {(profile.athleteType || profile.bio) ? (
-              <View style={styles.bioSection}>
-                {profile.athleteType ? (
-                  <Text style={styles.sport}>{profile.athleteType}</Text>
-                ) : null}
-                {profile.bio ? (
-                  <Text style={styles.bio}>{profile.bio}</Text>
-                ) : null}
-              </View>
-            ) : null}
-
-            {/* ── Action buttons ────────────────────────────────────────────── */}
-            {/* isSelf case is handled by the Redirect above; only other athletes reach here */}
-            <View style={styles.actionRow}>
-              {(
-                <GlowButton
-                  label={isFollowing ? "Following" : "Follow"}
-                  onPress={() => {
-                    if (!targetUserId || !currentUserId) return;
-                    if (isFollowing) unfollow(targetUserId);
-                    else follow(targetUserId);
-                  }}
-                  variant={isFollowing ? "secondary" : "primary"}
-                  size="sm"
-                  style={{ flex: 1 }}
-                />
-              )}
-            </View>
-
-            {/* ── Posts / Battles / Saved tabs ─────────────────────────────── */}
-            <View style={styles.tabs}>
-              {tabs.map((tab) => {
-                const isActive = activeTab === tab.key;
-                return (
-                  <Pressable
-                    key={tab.key}
-                    onPress={() => setActiveTab(tab.key)}
-                    style={styles.tabButton}
-                  >
-                    <Text style={[styles.tabText, isActive && styles.tabTextActive]}>
-                      {tab.label}
-                    </Text>
-                    <View
-                      style={[styles.tabUnderline, isActive && styles.tabUnderlineActive]}
-                    />
-                  </Pressable>
-                );
-              })}
-            </View>
+          <View style={styles.headerWrap}>
+            <ProfileHeader
+              profile={profile}
+              postsCount={posts.length}
+              battlesCount={profileBattles.length}
+              isOwn={false}
+              hasTrendingPost={hasTrendingPost}
+              isFollowing={isFollowing}
+              onFollow={handleFollowToggle}
+              onChallenge={handleHeaderChallenge}
+              onMessage={handleMessage}
+              scrollY={scrollY}
+            />
+            <ProfileTabs
+              tabs={PROFILE_TABS}
+              activeKey={activeTab}
+              onChange={handleTabChange}
+            />
           </View>
         }
         ListEmptyComponent={
-          activeTab === "posts" && postsLoading ? (
-            <LoadingSpinner label="Loading posts…" />
+          isGridTab && postsLoading ? (
+            <ProfileGridSkeleton />
           ) : activeTab === "battles" && battlesLoading ? (
             <LoadingSpinner label="Loading battles…" />
           ) : activeTab === "battles" ? (
             <EmptyState
               icon="⚔️"
               title="No battle history"
-              subtitle="Completed battles will show up here."
+              subtitle={`Challenge ${profile.username} to start one.`}
+              actionLabel={`Challenge ${profile.username}`}
+              onAction={handleHeaderChallenge}
             />
           ) : activeTab === "saved" ? (
             <EmptyState
@@ -405,16 +268,39 @@ export default function PlayerProfileScreen() {
               title="No saved posts"
               subtitle="Saved posts will show up here."
             />
+          ) : activeTab === "highlights" ? (
+            <EmptyState
+              icon="🎬"
+              title="No video highlights yet"
+              subtitle="This athlete hasn't posted any videos."
+            />
           ) : (
             <EmptyState
               icon="📷"
-              title="No posts yet"
+              title="No highlights yet"
               subtitle="This athlete hasn't posted any highlights."
             />
           )
         }
         showsVerticalScrollIndicator={false}
       />
+
+      {/* Collapsing compact bar — name fades in as the header scrolls away */}
+      <ProfileCompactBar
+        username={profile.username}
+        avatarUri={profile.avatarUrl || profile.avatar}
+        verified={profile.verified}
+        scrollY={scrollY}
+        left={
+          <IconButton
+            icon="chevron-left"
+            accessibilityLabel="Go back"
+            onPress={goBack}
+            color={COLORS.textPrimary}
+          />
+        }
+      />
+
       <PostDetailModal
         visible={!!selectedPost}
         post={selectedPost}
@@ -439,225 +325,31 @@ export default function PlayerProfileScreen() {
   );
 }
 
-// ─── Styles (mirrors app/(tabs)/profile.tsx) ──────────────────────────────────
+// ─── Styles (layout-only — identity/badge/stat styles live in ProfileHeader) ──
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: COLORS.background },
-  postModalSafe: { flex: 1, backgroundColor: COLORS.background },
-  postModalTopBar: {
-    paddingHorizontal: SPACING.lg,
-    paddingTop: SPACING.sm,
-    paddingBottom: SPACING.xs,
-  },
 
-  profileHeader: {
-    paddingBottom: 0,
-    backgroundColor: COLORS.background,
-  },
-
-  // ── Top bar (back navigation) ─────────────────────────────────────────────
-  topBar: {
+  // Fallback bar for the not-found state (compact bar needs a profile).
+  fallbackTopBar: {
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: SPACING.lg,
-    paddingTop: SPACING.md,
-    paddingBottom: SPACING.sm,
-    minHeight: 48,
-  },
-  backBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: COLORS.surface,
-    borderWidth: 1,
-    borderColor: COLORS.cardBorder,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  backIcon: { color: COLORS.textPrimary, fontSize: 22, lineHeight: 28, marginTop: -2 },
-
-  // ── Identity ──────────────────────────────────────────────────────────────
-  identityRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: SPACING.lg,
-    paddingBottom: SPACING.lg,
-    gap: SPACING.lg,
-  },
-  avatarRingWrap: {
-    borderRadius: 46,
-    borderWidth: 3,
-    borderColor: COLORS.accent,
-    padding: 2,
-    overflow: "hidden",
-  },
-  identityText: { flex: 1 },
-  username: {
-    color: COLORS.textPrimary,
-    fontSize: 24,
-    fontWeight: FONTS.heavy,
-    marginBottom: 3,
-  },
-  handle: {
-    color: COLORS.textHandle,
-    fontSize: 14,
-    fontWeight: FONTS.medium,
+    paddingHorizontal: SPACING.md,
+    minHeight: COMPACT_BAR_HEIGHT,
   },
 
-  // ── Stats ─────────────────────────────────────────────────────────────────
-  statsRow: {
-    flexDirection: "row",
-    justifyContent: "center",
-    alignItems: "center",
-    paddingVertical: SPACING.lg,
-    paddingHorizontal: SPACING.xl,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.cardBorder,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.cardBorder,
-    marginBottom: SPACING.md,
-  },
-  stat: { flex: 1, alignItems: "center" },
-  statDivider: {
-    width: 1,
-    height: 36,
-    backgroundColor: COLORS.cardBorder,
-  },
-  statValue: {
-    color: COLORS.textPrimary,
-    fontSize: 22,
-    fontWeight: FONTS.heavy,
-  },
-  statLabel: {
-    color: COLORS.textMuted,
-    fontSize: 11,
-    marginTop: 3,
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-  },
-
-  // ── Bio / sport ───────────────────────────────────────────────────────────
-  bioSection: {
-    paddingHorizontal: SPACING.lg,
-    paddingBottom: SPACING.md,
-    gap: 4,
-    alignItems: "center",
-  },
-  sport: {
-    color: COLORS.accent,
-    fontSize: 14,
-    fontWeight: FONTS.semibold,
-    textAlign: "center",
-  },
-  bio: {
-    color: COLORS.textSecondary,
-    fontSize: 13,
-    lineHeight: 19,
-    textAlign: "center",
-  },
-
-  // ── Action buttons ────────────────────────────────────────────────────────
-  actionRow: {
-    flexDirection: "row",
-    gap: SPACING.sm,
-    marginHorizontal: SPACING.lg,
-    marginBottom: SPACING.md,
-  },
-
-  // ── Tabs ──────────────────────────────────────────────────────────────────
-  tabs: {
-    flexDirection: "row",
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.cardBorder,
-    paddingHorizontal: SPACING.lg,
+  // Header + tabs render full-bleed inside the padded grid container.
+  headerWrap: {
+    marginHorizontal: -SPACING.lg,
     marginBottom: SPACING.sm,
   },
-  tabButton: {
-    flex: 1,
-    alignItems: "center",
-    paddingTop: SPACING.sm,
-    paddingBottom: 0,
-  },
-  tabText: {
-    color: COLORS.textMuted,
-    fontSize: 14,
-    fontWeight: FONTS.bold,
-  },
-  tabTextActive: { color: COLORS.textPrimary },
-  tabUnderline: {
-    width: "80%",
-    height: 2,
-    borderRadius: 2,
-    backgroundColor: COLORS.transparent,
-    marginTop: SPACING.sm,
-  },
-  tabUnderlineActive: { backgroundColor: COLORS.accent },
 
   // ── Grid ─────────────────────────────────────────────────────────────────
+  // paddingHorizontal must stay SPACING.lg — PostGridThumb's CELL math and
+  // ProfileGridSkeleton both assume it.
   grid: {
-    paddingHorizontal: SPACING.md,
+    paddingTop: COMPACT_BAR_HEIGHT,
+    paddingHorizontal: SPACING.lg,
     paddingBottom: SPACING.xxxl,
     gap: SPACING.sm,
   },
-
-  // ── Post thumbnail video badge ─────────────────────────────────────────────
-  videoBadge: {
-    position: "absolute",
-    top: 4,
-    right: 4,
-    backgroundColor: "rgba(0,0,0,0.6)",
-    borderRadius: RADIUS.xs,
-    paddingHorizontal: 4,
-    paddingVertical: 1,
-  },
-  videoBadgeText: {
-    color: COLORS.white,
-    fontSize: 9,
-    fontWeight: FONTS.bold,
-  },
-
-  // ── Battle history cards ──────────────────────────────────────────────────
-  battleCard: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.md,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.cardBorder,
-    gap: SPACING.md,
-  },
-  battleThumb: {
-    width: 68,
-    height: 68,
-    borderRadius: RADIUS.md,
-    overflow: "hidden",
-    backgroundColor: COLORS.surface,
-    flexShrink: 0,
-  },
-  battleInfo: { flex: 1 },
-  battleMetaRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 4,
-  },
-  resultPill: {
-    overflow: "hidden",
-    borderRadius: RADIUS.full,
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: 3,
-    fontSize: 11,
-    fontWeight: FONTS.heavy,
-  },
-  resultWin:  { color: COLORS.accent,         backgroundColor: COLORS.accentFaint },
-  resultLoss: { color: COLORS.error,           backgroundColor: COLORS.errorFaint },
-  resultLive: { color: COLORS.textSecondary,   backgroundColor: COLORS.input },
-  battleDate: { color: COLORS.textMuted, fontSize: 12 },
-  battleTitle: {
-    color: COLORS.textPrimary,
-    fontSize: 15,
-    fontWeight: FONTS.bold,
-    marginBottom: 2,
-  },
-  battleOpponent: { color: COLORS.textSecondary, fontSize: 13 },
-  battleOpponentLink: { color: COLORS.accent, textDecorationLine: "underline" },
 });

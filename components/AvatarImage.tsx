@@ -20,6 +20,8 @@ export default function AvatarImage({ uri, username = "?", size = 40 }: Props) {
   if (!uri || failed) {
     return (
       <View
+        accessibilityRole="image"
+        accessibilityLabel={`${username}'s avatar`}
         style={[
           styles.fallback,
           { width: size, height: size, borderRadius: size / 2 },
@@ -33,6 +35,7 @@ export default function AvatarImage({ uri, username = "?", size = 40 }: Props) {
   return (
     <Image
       source={{ uri }}
+      accessibilityLabel={`${username}'s avatar`}
       style={{ width: size, height: size, borderRadius: size / 2 }}
       onError={() => {
         setFailed(true);

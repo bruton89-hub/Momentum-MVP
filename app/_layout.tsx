@@ -19,13 +19,21 @@ export default function RootLayout() {
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (user) {
         setUserId(user.uid);
-        const profile = await fetchUserProfile(user.uid);
-        setProfile(profile);
+        // Auth identity is enough to enter the app. Profile data is decorative
+        // for Home and can hydrate without extending the native splash screen.
+        setLoading(false);
+        fetchUserProfile(user.uid)
+          .then((profile) => {
+            if (auth.currentUser?.uid === user.uid) setProfile(profile);
+          })
+          .catch((error) => {
+            console.error("[RootLayout] profile hydration failed", error);
+          });
       } else {
         setUserId(null);
         setProfile(null);
+        setLoading(false);
       }
-      setLoading(false);
     });
     return unsub;
   }, [setUserId, setProfile, setLoading]);

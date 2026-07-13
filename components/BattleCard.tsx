@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { memo, useEffect, useMemo, useState } from "react";
 import {
   View,
   Text,
@@ -7,15 +7,21 @@ import {
   Dimensions,
 } from "react-native";
 import { useRouter } from "expo-router";
-import { COLORS, SPACING, RADIUS, FONTS } from "@/constants/theme";
+import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
+import Animated, { FadeIn, useReducedMotion } from "react-native-reanimated";
+import { COLORS, SPACING, RADIUS, FONTS, TYPE } from "@/constants/theme";
 import AvatarImage from "./AvatarImage";
 import GlowButton from "./GlowButton";
 import BattleMedia from "./BattleMedia";
+import BattleStatusBadge from "./BattleStatusBadge";
+import VoteBar from "./VoteBar";
+import IconButton from "./IconButton";
 import { openAthleteProfile } from "@/utils/navigation";
+import { toHandle } from "@/utils/format";
 import { shareBattle } from "@/utils/shareBattle";
 import { isVideoMedia, normalizeFirebaseStorageUrl } from "@/utils/media";
 import type { Battle, BattlePlayer } from "@/types";
-import { isBattleExpired, timeRemaining } from "@/hooks/useBattles";
+import { getBattleStatus, timeRemaining } from "@/hooks/useBattles";
 
 const { width: SCREEN_W } = Dimensions.get("window");
 const CARD_PAD = SPACING.md;
@@ -37,15 +43,11 @@ interface Props {
   autoPlayMedia?: boolean;
 }
 
-function toHandle(username: string): string {
-  return "@" + username.toLowerCase().replace(/\s+/g, ".");
-}
-
 // ── Open slot placeholder ────────────────────────────────────────────────────
 function OpenSlot({ thumbW, thumbH }: { thumbW: number; thumbH: number }) {
   return (
     <View style={[styles.thumbWrapper, { width: thumbW, height: thumbH }, styles.openSlot]}>
-      <Text style={styles.openSlotIcon}>⏳</Text>
+      <Feather name="clock" size={22} color={COLORS.accent} />
       <Text style={styles.openSlotText}>Waiting for{"\n"}challenger</Text>
     </View>
   );
@@ -55,23 +57,20 @@ function OpenSlot({ thumbW, thumbH }: { thumbW: number; thumbH: number }) {
 function IncompleteBattleCard() {
   return (
     <View style={[styles.card, styles.incompleteCard]}>
-      <Text style={styles.incompleteIcon}>⚔️</Text>
+      <MaterialCommunityIcons name="sword-cross" size={28} color={COLORS.textMuted} />
       <Text style={styles.incompleteTitle}>Waiting for challenger</Text>
       <Text style={styles.incompleteSub}>This battle is being set up.</Text>
     </View>
   );
 }
 
-// ── Player column ────────────────────────────────────────────────────────────
+// ── Player column — avatar → name → highlight, fight-card style ─────────────
 function PlayerCol({
   player,
   side,
   userVote,
   isCompleted,
   winner,
-  votesA,
-  votesB,
-  isOpen,
   canVote,
   onVote,
   battleId,
@@ -79,15 +78,13 @@ function PlayerCol({
   thumbH,
   currentUserId,
   autoPlayMedia,
+  reducedMotion,
 }: {
   player: BattlePlayer | null;
   side: "A" | "B";
   userVote: "A" | "B" | null;
   isCompleted: boolean;
   winner: string | null;
-  votesA: number;
-  votesB: number;
-  isOpen: boolean;
   canVote: boolean;
   onVote: (battleId: string, side: "A" | "B") => void;
   battleId: string;
@@ -95,6 +92,7 @@ function PlayerCol({
   thumbH: number;
   currentUserId?: string | null;
   autoPlayMedia: boolean;
+  reducedMotion: boolean;
 }) {
   // useRouter must be called before any early return (Rules of Hooks)
   const router = useRouter();
@@ -135,8 +133,23 @@ function PlayerCol({
 
   return (
     <View style={styles.playerCol}>
-      {/* Player name + handle — tappable to navigate to profile */}
-      <Pressable onPress={goToProfile} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
+      {/* Avatar + name + handle — tappable to navigate to profile */}
+      <Pressable
+        onPress={goToProfile}
+        hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+        accessibilityRole="link"
+        accessibilityLabel={`View ${player.username}'s profile`}
+        style={styles.playerIdentity}
+      >
+        <View
+          style={[
+            styles.playerAvatarRing,
+            myVote && styles.playerAvatarRingVoted,
+            isWinner && styles.playerAvatarRingWinner,
+          ]}
+        >
+          <AvatarImage uri={player.avatar || null} username={player.username || "?"} size={32} />
+        </View>
         <Text style={styles.playerName} numberOfLines={1}>{player.username}</Text>
         <Text style={styles.playerHandle} numberOfLines={1}>{toHandle(player.username)}</Text>
       </Pressable>
@@ -146,7 +159,19 @@ function PlayerCol({
           internal Image can use absoluteFillObject without % resolution issues. */}
       <Pressable
         onPress={isVideo || canVote ? handleThumbPress : undefined}
-        style={[styles.thumbWrapper, { width: thumbW, height: thumbH }]}
+        accessibilityRole={canVote ? "button" : undefined}
+        accessibilityLabel={
+          canVote
+            ? `Vote for ${player.username}`
+            : isVideo
+            ? `${player.username}'s video. Tap to play or pause.`
+            : `${player.username}'s post`
+        }
+        style={[
+          styles.thumbWrapper,
+          { width: thumbW, height: thumbH },
+          isWinner && styles.thumbWrapperWinner,
+        ]}
       >
         <BattleMedia
           uri={player.mediaUrl || null}
@@ -156,18 +181,28 @@ function PlayerCol({
           context="BattleCard"
         />
 
-        {/* Voted overlay */}
+        {/* Voted overlay — fades in on vote */}
         {myVote && (
-          <View style={styles.votedOverlay}>
-            <Text style={styles.votedCheck}>✓</Text>
-          </View>
+          <Animated.View
+            entering={reducedMotion ? undefined : FadeIn.duration(220)}
+            style={styles.votedOverlay}
+            accessible
+            accessibilityLabel="Your vote"
+          >
+            <Feather name="check-circle" size={40} color={COLORS.accent} />
+            <Text style={styles.votedOverlayText}>YOUR VOTE</Text>
+          </Animated.View>
         )}
 
-        {/* Winner crown — prominent bottom banner */}
+        {/* Winner banner — gold, restrained reveal */}
         {isWinner && (
-          <View style={styles.winnerBadge}>
-            <Text style={styles.winnerText}>👑 WINNER</Text>
-          </View>
+          <Animated.View
+            entering={reducedMotion ? undefined : FadeIn.duration(300)}
+            style={styles.winnerBadge}
+          >
+            <MaterialCommunityIcons name="trophy" size={12} color={COLORS.warning} />
+            <Text style={styles.winnerText}>BATTLE WINNER</Text>
+          </Animated.View>
         )}
 
         {/* Tap to vote hint */}
@@ -177,17 +212,17 @@ function PlayerCol({
           </View>
         )}
       </Pressable>
-
-      {/* Avatar — tappable to navigate to profile */}
-      <Pressable onPress={goToProfile} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
-        <AvatarImage uri={player.avatar || null} username={player.username || "?"} size={22} />
-      </Pressable>
     </View>
   );
 }
 
 // ── Main BattleCard ──────────────────────────────────────────────────────────
-export default function BattleCard({
+// PERF: memoized — all props are primitives or stable references (onVote /
+// onAccept are useCallback-stable in callers; battle object identity only
+// changes when its data actually changes). Prevents every visible card from
+// re-rendering its media tree when the Battles screen re-renders for modal
+// open/close or unrelated state.
+function BattleCard({
   battle,
   userVote,
   onVote,
@@ -196,6 +231,8 @@ export default function BattleCard({
   featured = false,
   autoPlayMedia = false,
 }: Props) {
+  const reducedMotion = useReducedMotion();
+
   if (!battle?.playerA) return <IncompleteBattleCard />;
 
   const thumbW = featured ? FEAT_THUMB_W : THUMB_W;
@@ -207,11 +244,12 @@ export default function BattleCard({
   const pctA = totalVotes > 0 ? Math.round((votesA / totalVotes) * 100) : 50;
   const pctB = 100 - pctA;
 
-  const expired    = isBattleExpired(battle);
-  const remaining  = timeRemaining(battle);
-  const isOpen      = battle.status === "open";
-  const isLive      = battle.status === "live" && !expired;
-  const isCompleted = battle.status === "completed" || (battle.status === "live" && expired);
+  // Single derived-status source (folds expiry into "completed").
+  const status = getBattleStatus(battle);
+  const remaining = timeRemaining(battle);
+  const isOpen = status === "open";
+  const isLive = status === "live";
+  const isCompleted = status === "completed";
 
   const canVote =
     isLive && !userVote && !!currentUserId && !!battle.playerB &&
@@ -225,6 +263,11 @@ export default function BattleCard({
   const mySide =
     currentUserId && battle.playerA?.userId === currentUserId ? "A" :
     currentUserId && battle.playerB?.userId === currentUserId ? "B" : null;
+
+  // Own open challenge (creator or playerA) — waiting state, no action.
+  const isWaitingForOpponent =
+    isOpen && !battle.playerB &&
+    (mySide !== null || battle.creatorId === currentUserId);
 
   async function handleShare() {
     try {
@@ -240,39 +283,21 @@ export default function BattleCard({
       {/* ── Status bar ──────────────────────────────────────────────────────── */}
       <View style={styles.statusRow}>
         <View style={styles.statusLeft}>
-          <View style={[
-            styles.statusBadge,
-            isLive      && styles.liveBadge,
-            isCompleted && styles.completedBadge,
-            isOpen      && styles.openBadge,
-          ]}>
-            <Text style={[
-              styles.statusText,
-              isLive      && styles.liveText,
-              isCompleted && styles.completedText,
-              isOpen      && styles.openText,
-            ]}>
-              {isLive ? "🏆 LIVE BATTLE" : isCompleted ? "✅ COMPLETED" : "🔓 OPEN CHALLENGE"}
-            </Text>
-          </View>
+          <BattleStatusBadge status={status} compact />
           {!!battle.category && <Text style={styles.category}>{battle.category}</Text>}
         </View>
 
         <View style={styles.statusRight}>
-          <Pressable
-            onPress={(event) => {
-              event.stopPropagation?.();
-              handleShare();
-            }}
-            style={styles.shareBtn}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          >
-            <Text style={styles.shareIcon}>↗</Text>
-          </Pressable>
+          <IconButton
+            icon="share"
+            size={26}
+            accessibilityLabel="Share battle"
+            onPress={handleShare}
+          />
           {mySide ? (
             <Text style={styles.myStatus}>
               {isOpen ? "Open" : isLive ? "Live" :
-               battle.winner === currentUserId ? "Won 🏆" : "Lost"}
+               battle.winner === currentUserId ? "Won" : "Lost"}
             </Text>
           ) : null}
           {!isOpen && !!remaining && !mySide && (
@@ -292,48 +317,52 @@ export default function BattleCard({
         <PlayerCol
           player={battle.playerA} side="A"
           userVote={userVote} isCompleted={isCompleted}
-          winner={battle.winner} votesA={votesA} votesB={votesB}
-          isOpen={isOpen} canVote={canVote}
+          winner={battle.winner}
+          canVote={canVote}
           onVote={onVote} battleId={battle.id}
           thumbW={thumbW} thumbH={thumbH}
           currentUserId={currentUserId}
           autoPlayMedia={autoPlayMedia}
+          reducedMotion={reducedMotion}
         />
 
+        {/* Fight-card VS treatment */}
         <View style={styles.vsCol}>
+          <View style={styles.vsRule} />
           <Text style={[styles.vs, featured && styles.vsFeatured]}>VS</Text>
+          <View style={styles.vsRule} />
         </View>
 
         <PlayerCol
           player={battle.playerB} side="B"
           userVote={userVote} isCompleted={isCompleted}
-          winner={battle.winner} votesA={votesA} votesB={votesB}
-          isOpen={isOpen} canVote={canVote}
+          winner={battle.winner}
+          canVote={canVote}
           onVote={onVote} battleId={battle.id}
           thumbW={thumbW} thumbH={thumbH}
           currentUserId={currentUserId}
           autoPlayMedia={autoPlayMedia}
+          reducedMotion={reducedMotion}
         />
       </View>
 
       {/* ── Vote bar ────────────────────────────────────────────────────────── */}
       {!isOpen && (
         <View style={styles.voteBarSection}>
-          <View style={styles.voteBarLabels}>
-            <Text style={styles.voteBarPctA}>{pctA}%</Text>
-            <Text style={styles.voteBarTotal}>{totalVotes.toLocaleString()} votes</Text>
-            <Text style={styles.voteBarPctB}>{pctB}%</Text>
-          </View>
-          <View style={styles.voteBarTrack}>
-            <View style={[styles.voteBarFillA, { flex: pctA }]} />
-            <View style={[styles.voteBarFillB, { flex: pctB }]} />
-          </View>
+          <VoteBar
+            pctA={pctA}
+            pctB={pctB}
+            totalVotes={totalVotes}
+            nameA={battle.playerA?.username}
+            nameB={battle.playerB?.username}
+          />
         </View>
       )}
 
       {/* ── Vote Now button ──────────────────────────────────────────────────── */}
       {canVote && (
         <View style={styles.voteNowSection}>
+          <Text style={styles.voteHint}>Which highlight is stronger? Cast your vote.</Text>
           <View style={styles.voteButtons}>
             <GlowButton
               label={`Vote ${battle.playerA?.username ?? "A"}`}
@@ -341,6 +370,7 @@ export default function BattleCard({
               variant="primary"
               size="sm"
               style={styles.voteBtn}
+              accessibilityLabel={`Vote for ${battle.playerA?.username ?? "Player A"}`}
             />
             <GlowButton
               label={`Vote ${battle.playerB?.username ?? "B"}`}
@@ -348,6 +378,7 @@ export default function BattleCard({
               variant="secondary"
               size="sm"
               style={styles.voteBtn}
+              accessibilityLabel={`Vote for ${battle.playerB?.username ?? "Player B"}`}
             />
           </View>
         </View>
@@ -361,8 +392,16 @@ export default function BattleCard({
             onPress={() => onAccept(battle.id)}
             variant="primary"
             size="sm"
-            style={styles.acceptBtn}
+            accessibilityLabel={`Accept challenge from ${battle.playerA?.username ?? "this athlete"}`}
           />
+        </View>
+      )}
+
+      {/* ── Waiting for opponent (own open challenge) ────────────────────────── */}
+      {isWaitingForOpponent && (
+        <View style={styles.waitingRow} accessible accessibilityLabel="Waiting for an opponent to accept">
+          <Feather name="clock" size={13} color={COLORS.textMuted} />
+          <Text style={styles.waitingText}>Waiting for an opponent…</Text>
         </View>
       )}
 
@@ -384,6 +423,8 @@ export default function BattleCard({
   );
 }
 
+export default memo(BattleCard);
+
 const styles = StyleSheet.create({
   card: {
     backgroundColor: COLORS.card,
@@ -395,8 +436,8 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
   cardFeatured: {
-    borderColor: "rgba(166,255,0,0.25)",
-    backgroundColor: "#131313",
+    borderColor: COLORS.accentBorderFaint,
+    backgroundColor: COLORS.surfaceRaised,
   },
 
   // Incomplete
@@ -407,7 +448,6 @@ const styles = StyleSheet.create({
     gap: SPACING.sm,
     borderStyle: "dashed",
   },
-  incompleteIcon: { fontSize: 28 },
   incompleteTitle: { color: COLORS.textSecondary, fontSize: 14, fontWeight: FONTS.semibold },
   incompleteSub: { color: COLORS.textMuted, fontSize: 12 },
 
@@ -432,36 +472,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: SPACING.sm,
   },
-  shareBtn: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    backgroundColor: COLORS.surface,
-    borderWidth: 1,
-    borderColor: COLORS.inputBorder,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  shareIcon: {
-    color: COLORS.textSecondary,
-    fontSize: 14,
-    fontWeight: FONTS.heavy,
-  },
-  statusBadge: {
-    borderRadius: RADIUS.xs,
-    paddingHorizontal: 7,
-    paddingVertical: 3,
-    backgroundColor: COLORS.surface,
-    borderWidth: 1,
-    borderColor: COLORS.inputBorder,
-  },
-  liveBadge: { backgroundColor: COLORS.liveFaint, borderColor: COLORS.live },
-  completedBadge: { backgroundColor: COLORS.accentFaint, borderColor: COLORS.accent },
-  openBadge: { backgroundColor: COLORS.surface, borderColor: COLORS.inputBorder },
-  statusText: { color: COLORS.textMuted, fontSize: 10, fontWeight: FONTS.heavy, letterSpacing: 0.5 },
-  liveText: { color: COLORS.live },
-  completedText: { color: COLORS.accent },
-  openText: { color: COLORS.textSecondary },
   category: { color: COLORS.textMuted, fontSize: 12, fontWeight: FONTS.medium, flexShrink: 1 },
   timer: { color: COLORS.textMuted, fontSize: 11, fontWeight: FONTS.semibold },
   myStatus: { color: COLORS.accent, fontSize: 11, fontWeight: FONTS.heavy },
@@ -499,8 +509,21 @@ const styles = StyleSheet.create({
   playerCol: {
     flex: 1,
     alignItems: "center",
-    gap: 4,
+    gap: 6,
   },
+  playerIdentity: {
+    alignItems: "center",
+    gap: 2,
+  },
+  playerAvatarRing: {
+    borderRadius: 20,
+    borderWidth: 2,
+    borderColor: COLORS.cardBorder,
+    padding: 1,
+    marginBottom: 2,
+  },
+  playerAvatarRingVoted: { borderColor: COLORS.accent },
+  playerAvatarRingWinner: { borderColor: COLORS.warning },
   playerName: {
     color: COLORS.textPrimary,
     fontSize: 14,
@@ -518,6 +541,13 @@ const styles = StyleSheet.create({
     width: 60,
     alignItems: "center",
     justifyContent: "center",
+    gap: 6,
+  },
+  vsRule: {
+    width: 1.5,
+    height: 18,
+    backgroundColor: COLORS.accentBorderFaint,
+    borderRadius: 1,
   },
   vs: {
     color: COLORS.accent,
@@ -537,6 +567,10 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.surface,
     position: "relative",
   },
+  thumbWrapperWinner: {
+    borderWidth: 1.5,
+    borderColor: COLORS.warningBorder,
+  },
   // Open slot
   openSlot: {
     alignItems: "center",
@@ -546,66 +580,64 @@ const styles = StyleSheet.create({
     borderStyle: "dashed",
     gap: 4,
   },
-  openSlotIcon: { color: COLORS.accent, fontSize: 22, fontWeight: FONTS.heavy },
-  openSlotText: { color: COLORS.textMuted, fontSize: 11, textAlign: "center" },
+  openSlotText: { color: COLORS.textMuted, fontSize: TYPE.caption, textAlign: "center" },
 
   // Overlays
   votedOverlay: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0,0,0,0.55)",
+    backgroundColor: COLORS.scrim,
     alignItems: "center",
     justifyContent: "center",
+    gap: 6,
   },
-  votedCheck: { color: COLORS.accent, fontSize: 44, fontWeight: FONTS.heavy },
+  votedOverlayText: {
+    color: COLORS.accent,
+    fontSize: TYPE.micro,
+    fontWeight: FONTS.extrabold,
+    letterSpacing: 1,
+  },
   winnerBadge: {
     position: "absolute",
     bottom: 6,
     alignSelf: "center",
-    backgroundColor: "rgba(0,0,0,0.78)",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: COLORS.scrimHeavy,
+    borderWidth: 1,
+    borderColor: COLORS.warningBorder,
     borderRadius: RADIUS.full,
     paddingHorizontal: 8,
     paddingVertical: 2,
   },
-  winnerText: { color: COLORS.accent, fontSize: 11, fontWeight: FONTS.heavy },
+  winnerText: { color: COLORS.warning, fontSize: TYPE.caption, fontWeight: FONTS.heavy },
   tapToVote: {
     position: "absolute",
     bottom: 0,
     left: 0,
     right: 0,
-    backgroundColor: "rgba(166,255,0,0.18)",
+    backgroundColor: COLORS.accentSoft,
     paddingVertical: 5,
     alignItems: "center",
   },
-  tapToVoteText: { color: COLORS.accent, fontSize: 11, fontWeight: FONTS.bold },
+  tapToVoteText: { color: COLORS.accent, fontSize: TYPE.caption, fontWeight: FONTS.bold },
 
   // Vote bar
   voteBarSection: {
     paddingHorizontal: SPACING.md,
     paddingBottom: SPACING.sm,
-    gap: 5,
   },
-  voteBarLabels: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  voteBarPctA: { color: COLORS.accent, fontSize: 14, fontWeight: FONTS.heavy },
-  voteBarPctB: { color: COLORS.textSecondary, fontSize: 14, fontWeight: FONTS.heavy },
-  voteBarTotal: { color: COLORS.textMuted, fontSize: 11 },
-  voteBarTrack: {
-    flexDirection: "row",
-    height: 12,
-    borderRadius: RADIUS.full,
-    overflow: "hidden",
-    backgroundColor: COLORS.surface,
-  },
-  voteBarFillA: { backgroundColor: COLORS.accent },
-  voteBarFillB: { backgroundColor: COLORS.inputBorder },
 
   // Vote Now
   voteNowSection: {
     paddingHorizontal: SPACING.md,
     paddingBottom: SPACING.md,
+  },
+  voteHint: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    textAlign: "center",
+    marginTop: SPACING.xs,
   },
   voteButtons: {
     flexDirection: "row",
@@ -619,7 +651,20 @@ const styles = StyleSheet.create({
     paddingHorizontal: SPACING.md,
     paddingBottom: SPACING.md,
   },
-  acceptBtn: {},
+
+  // Waiting for opponent
+  waitingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingBottom: SPACING.md,
+  },
+  waitingText: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    fontWeight: FONTS.semibold,
+  },
 
   // Voted msg
   votedMsg: {

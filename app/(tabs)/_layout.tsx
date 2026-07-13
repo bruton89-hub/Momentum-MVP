@@ -18,7 +18,7 @@ function TabIcon({
   focused,
   isCreate = false,
 }: {
-  children: React.ReactNode;
+  children?: React.ReactNode;
   label: string;
   focused: boolean;
   isCreate?: boolean;
@@ -126,10 +126,7 @@ export default function TabsLayout() {
         options={{
           title: "Create",
           tabBarIcon: ({ focused }) => (
-            <TabIcon label="Create" focused={focused} isCreate>
-              {/* children unused for isCreate — icon is rendered inside TabIcon */}
-              <Text />
-            </TabIcon>
+            <TabIcon label="Create" focused={focused} isCreate />
           ),
         }}
       />

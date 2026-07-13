@@ -23,11 +23,17 @@ import {
   Dimensions,
 } from "react-native";
 import { useRouter } from "expo-router";
-import { COLORS, FONTS, SPACING, RADIUS } from "@/constants/theme";
+import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
+import Animated, { FadeInDown, useReducedMotion } from "react-native-reanimated";
+import { COLORS, FONTS, SPACING, RADIUS, TYPE, HIT_SLOP } from "@/constants/theme";
 import AvatarImage from "./AvatarImage";
 import GlowButton from "./GlowButton";
 import BattleMedia from "./BattleMedia";
+import BattleStatusBadge from "./BattleStatusBadge";
+import VoteBar from "./VoteBar";
+import IconButton from "./IconButton";
 import { openAthleteProfile } from "@/utils/navigation";
+import { toHandle, formatBattleDate } from "@/utils/format";
 import { shareBattle } from "@/utils/shareBattle";
 import { isVideoMedia, normalizeFirebaseStorageUrl } from "@/utils/media";
 import {
@@ -51,32 +57,6 @@ interface Props {
   currentUserId?: string | null;
   onAccept?: (battleId: string) => void;
   onSkip?: (battleId: string) => void;
-}
-
-// ── Status label / colour helpers ────────────────────────────────────────────
-
-function statusLabel(status: "open" | "live" | "completed"): string {
-  if (status === "live")      return "🏆 LIVE BATTLE";
-  if (status === "completed") return "✅ COMPLETED";
-  return "🔓 OPEN CHALLENGE";
-}
-
-function statusColor(status: "open" | "live" | "completed"): string {
-  if (status === "live")      return COLORS.live;
-  if (status === "completed") return COLORS.accent;
-  return COLORS.textSecondary;
-}
-
-function statusBg(status: "open" | "live" | "completed"): string {
-  if (status === "live")      return COLORS.liveFaint;
-  if (status === "completed") return COLORS.accentFaint;
-  return COLORS.surface;
-}
-
-function statusBorder(status: "open" | "live" | "completed"): string {
-  if (status === "live")      return COLORS.live;
-  if (status === "completed") return COLORS.accent;
-  return COLORS.inputBorder;
 }
 
 // ── Player thumbnail column ───────────────────────────────────────────────────
@@ -134,13 +114,18 @@ function PlayerThumb({
   return (
     <View style={detail.thumbCol}>
       {/* Player name */}
-      <Pressable onPress={goProfile} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
+      <Pressable
+        onPress={goProfile}
+        hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+        accessibilityRole="link"
+        accessibilityLabel={player ? `View ${player.username}'s profile` : undefined}
+      >
         <Text style={detail.playerName} numberOfLines={1}>
           {player?.username ?? (side === "A" ? "Player A" : "Challenger")}
         </Text>
         {player && (
           <Text style={detail.playerHandle} numberOfLines={1}>
-            @{player.username.toLowerCase().replace(/\s+/g, ".")}
+            {toHandle(player.username)}
           </Text>
         )}
       </Pressable>
@@ -149,6 +134,14 @@ function PlayerThumb({
       {player ? (
         <Pressable
           onPress={isVideo || canVote ? handleThumbPress : undefined}
+          accessibilityRole={canVote ? "button" : undefined}
+          accessibilityLabel={
+            canVote
+              ? `Vote for ${player.username}`
+              : isVideo
+              ? `${player.username}'s video. Tap to play or pause.`
+              : `${player.username}'s post`
+          }
           style={[detail.thumbWrap, { width: THUMB_W, height: THUMB_H }]}
         >
           <BattleMedia
@@ -160,14 +153,15 @@ function PlayerThumb({
           />
           {/* Voted overlay */}
           {voted && (
-            <View style={detail.overlay}>
-              <Text style={detail.votedCheck}>✓</Text>
+            <View style={detail.overlay} accessible accessibilityLabel="Your vote">
+              <Feather name="check-circle" size={40} color={COLORS.accent} />
             </View>
           )}
-          {/* Winner crown */}
+          {/* Winner banner — gold */}
           {isWinner && (
             <View style={detail.winnerBadge}>
-              <Text style={detail.winnerText}>👑 WINNER</Text>
+              <MaterialCommunityIcons name="trophy" size={12} color={COLORS.warning} />
+              <Text style={detail.winnerText}>BATTLE WINNER</Text>
             </View>
           )}
           {/* Tap to vote hint */}
@@ -179,7 +173,7 @@ function PlayerThumb({
         </Pressable>
       ) : (
         <View style={[detail.thumbWrap, detail.openSlot, { width: THUMB_W, height: THUMB_H }]}>
-          <Text style={detail.openSlotIcon}>⏳</Text>
+          <Feather name="clock" size={22} color={COLORS.accent} />
           <Text style={detail.openSlotText}>Waiting for{"\n"}challenger</Text>
         </View>
       )}
@@ -206,6 +200,17 @@ export default function BattleDetailModal({
   onAccept,
   onSkip,
 }: Props) {
+  const reducedMotion = useReducedMotion();
+  // Duplicate-tap guard: once a vote button is pressed, both buttons lock
+  // until the vote resolves (userVote changes) or a different battle opens.
+  // If the backend rejects the vote, the parent reverts optimistic state and
+  // userVote stays null — this effect then re-enables the buttons.
+  const [pendingSide, setPendingSide] = useState<"A" | "B" | null>(null);
+  const battleId = battle?.id ?? null;
+  useEffect(() => {
+    setPendingSide(null);
+  }, [battleId, userVote]);
+
   if (!battle) return null;
   const activeBattle = battle;
 
@@ -266,26 +271,26 @@ export default function BattleDetailModal({
           {/* Handle */}
           <View style={detail.handle} />
 
-          {/* Close button */}
-          <Pressable onPress={onClose} style={detail.closeBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-            <Text style={detail.closeIcon}>✕</Text>
-          </Pressable>
-
-          <Pressable onPress={handleShare} style={detail.shareBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-            <Text style={detail.shareIcon}>↗</Text>
-          </Pressable>
+          {/* Close + share buttons */}
+          <IconButton
+            icon="x"
+            size={32}
+            accessibilityLabel="Close battle details"
+            onPress={onClose}
+            style={detail.closeBtn}
+          />
+          <IconButton
+            icon="share"
+            size={32}
+            accessibilityLabel="Share battle"
+            onPress={handleShare}
+            style={detail.shareBtn}
+          />
 
           <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: SPACING.xxxl }}>
             {/* Status row */}
             <View style={detail.statusRow}>
-              <View style={[detail.statusBadge, {
-                backgroundColor: statusBg(status),
-                borderColor: statusBorder(status),
-              }]}>
-                <Text style={[detail.statusText, { color: statusColor(status) }]}>
-                  {statusLabel(status)}
-                </Text>
-              </View>
+              <BattleStatusBadge status={status} />
               {!!timeLabel && (
                 <Text style={detail.timeLabel}>{timeLabel}</Text>
               )}
@@ -332,15 +337,14 @@ export default function BattleDetailModal({
             {/* Vote bar — shown when there are players on both sides */}
             {!isOpen && (
               <View style={detail.voteBarSection}>
-                <View style={detail.voteBarLabels}>
-                  <Text style={detail.pctA}>{pctA}%</Text>
-                  <Text style={detail.voteTotal}>{total.toLocaleString()} votes</Text>
-                  <Text style={detail.pctB}>{pctB}%</Text>
-                </View>
-                <View style={detail.voteBarTrack}>
-                  <View style={[detail.voteBarA, { flex: pctA }]} />
-                  <View style={[detail.voteBarB, { flex: pctB }]} />
-                </View>
+                <VoteBar
+                  pctA={pctA}
+                  pctB={pctB}
+                  totalVotes={total}
+                  nameA={battle.playerA?.username}
+                  nameB={battle.playerB?.username}
+                  height={10}
+                />
               </View>
             )}
 
@@ -348,28 +352,49 @@ export default function BattleDetailModal({
             {(canVote || (isLive && onSkip)) && (
               <View style={detail.actionSection}>
                 {canVote && (
-                  <View style={detail.voteButtons}>
-                    <GlowButton
-                      label={`Vote ${battle.playerA?.username ?? "A"}`}
-                      onPress={() => { onVote(battle.id, "A"); }}
-                      variant="primary"
-                      size="sm"
-                      style={detail.voteBtn}
-                    />
-                    <GlowButton
-                      label={`Vote ${battle.playerB?.username ?? "B"}`}
-                      onPress={() => { onVote(battle.id, "B"); }}
-                      variant="secondary"
-                      size="sm"
-                      style={detail.voteBtn}
-                    />
-                  </View>
+                  <>
+                    <Text style={detail.voteHint}>
+                      Which highlight is stronger? Your vote decides the winner.
+                    </Text>
+                    <View style={detail.voteButtons}>
+                      <GlowButton
+                        label={`Vote ${battle.playerA?.username ?? "A"}`}
+                        onPress={() => {
+                          if (pendingSide) return;
+                          setPendingSide("A");
+                          onVote(battle.id, "A");
+                        }}
+                        loading={pendingSide === "A"}
+                        disabled={pendingSide !== null}
+                        variant="primary"
+                        size="sm"
+                        style={detail.voteBtn}
+                        accessibilityLabel={`Vote for ${battle.playerA?.username ?? "Player A"}`}
+                      />
+                      <GlowButton
+                        label={`Vote ${battle.playerB?.username ?? "B"}`}
+                        onPress={() => {
+                          if (pendingSide) return;
+                          setPendingSide("B");
+                          onVote(battle.id, "B");
+                        }}
+                        loading={pendingSide === "B"}
+                        disabled={pendingSide !== null}
+                        variant="secondary"
+                        size="sm"
+                        style={detail.voteBtn}
+                        accessibilityLabel={`Vote for ${battle.playerB?.username ?? "Player B"}`}
+                      />
+                    </View>
+                  </>
                 )}
                 {onSkip && (
                   <Pressable
                     onPress={() => onSkip(battle.id)}
-                    style={detail.skipBtn}
-                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    style={({ pressed }) => [detail.skipBtn, pressed && { opacity: 0.7 }]}
+                    hitSlop={HIT_SLOP}
+                    accessibilityRole="button"
+                    accessibilityLabel="Skip to next battle"
                   >
                     <Text style={detail.skipBtnText}>Skip to next battle →</Text>
                   </Pressable>
@@ -404,12 +429,25 @@ export default function BattleDetailModal({
               <Text style={detail.ownMsg}>You can't vote in your own battle</Text>
             )}
 
-            {/* Winner banner */}
+            {/* Winner banner — restrained gold reveal */}
             {isCompleted && (
-              <View style={detail.winnerBanner}>
+              <Animated.View
+                entering={reducedMotion ? undefined : FadeInDown.duration(320)}
+                style={detail.winnerBanner}
+                accessible
+                accessibilityLabel={
+                  winner === "tie"
+                    ? `Battle completed. Tie at ${votesA} to ${votesB} votes.`
+                    : winner !== null
+                    ? `Battle completed. ${(winner as BattlePlayer).username} won with ${
+                        winnerIsA ? pctA : pctB
+                      } percent of votes.`
+                    : "Battle completed."
+                }
+              >
                 {winner === "tie" ? (
                   <>
-                    <Text style={detail.winnerBannerIcon}>🤝</Text>
+                    <MaterialCommunityIcons name="handshake" size={32} color={COLORS.accent} />
                     <Text style={detail.winnerBannerLabel}>It's a Tie!</Text>
                     <Text style={detail.winnerBannerSub}>
                       {votesA === 0 && votesB === 0
@@ -419,22 +457,57 @@ export default function BattleDetailModal({
                   </>
                 ) : winner !== null ? (
                   <>
-                    <Text style={detail.winnerBannerIcon}>🏆</Text>
+                    <MaterialCommunityIcons name="trophy" size={32} color={COLORS.warning} />
                     <Text style={detail.winnerBannerLabel}>
                       {(winner as BattlePlayer).username} wins!
                     </Text>
                     <Text style={detail.winnerBannerSub}>
                       {winnerIsA ? `${votesA} — ${votesB}` : `${votesB} — ${votesA}`} votes
+                      {` · ${winnerIsA ? pctA : pctB}%`}
                     </Text>
                   </>
                 ) : (
                   <>
-                    <Text style={detail.winnerBannerIcon}>✅</Text>
+                    <Feather name="check-circle" size={32} color={COLORS.accent} />
                     <Text style={detail.winnerBannerLabel}>Battle ended</Text>
                   </>
                 )}
-              </View>
+              </Animated.View>
             )}
+
+            {/* Battle metadata */}
+            <View style={detail.metaSection}>
+              {!!battle.category && (
+                <View style={detail.metaRow}>
+                  <Text style={detail.metaLabel}>Category</Text>
+                  <Text style={detail.metaValue}>{battle.category}</Text>
+                </View>
+              )}
+              {typeof battle.durationHours === "number" && (
+                <View style={detail.metaRow}>
+                  <Text style={detail.metaLabel}>Duration</Text>
+                  <Text style={detail.metaValue}>{battle.durationHours}h</Text>
+                </View>
+              )}
+              {!!battle.createdAt && (
+                <View style={detail.metaRow}>
+                  <Text style={detail.metaLabel}>Started</Text>
+                  <Text style={detail.metaValue}>{formatBattleDate(battle.createdAt)}</Text>
+                </View>
+              )}
+              {isCompleted && !!battle.endTime && (
+                <View style={detail.metaRow}>
+                  <Text style={detail.metaLabel}>Ended</Text>
+                  <Text style={detail.metaValue}>
+                    {formatBattleDate(battle.endTime as Battle["createdAt"])}
+                  </Text>
+                </View>
+              )}
+              <View style={detail.metaRow}>
+                <Text style={detail.metaLabel}>Total votes</Text>
+                <Text style={detail.metaValue}>{total.toLocaleString()}</Text>
+              </View>
+            </View>
           </ScrollView>
         </View>
       </View>
@@ -471,31 +544,13 @@ const detail = StyleSheet.create({
     top: SPACING.md,
     right: SPACING.xl,
     zIndex: 10,
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: COLORS.surface,
-    borderWidth: 1,
-    borderColor: COLORS.cardBorder,
-    alignItems: "center",
-    justifyContent: "center",
   },
-  closeIcon: { color: COLORS.textSecondary, fontSize: 14, fontWeight: FONTS.heavy },
   shareBtn: {
     position: "absolute",
     top: SPACING.md,
     right: SPACING.xl + 40,
     zIndex: 10,
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: COLORS.surface,
-    borderWidth: 1,
-    borderColor: COLORS.cardBorder,
-    alignItems: "center",
-    justifyContent: "center",
   },
-  shareIcon: { color: COLORS.textSecondary, fontSize: 15, fontWeight: FONTS.heavy },
 
   // Status
   statusRow: {
@@ -505,13 +560,6 @@ const detail = StyleSheet.create({
     marginBottom: SPACING.xs,
     marginTop: SPACING.sm,
   },
-  statusBadge: {
-    borderRadius: RADIUS.xs,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderWidth: 1,
-  },
-  statusText: { fontSize: 11, fontWeight: FONTS.heavy, letterSpacing: 0.5 },
   timeLabel: { color: COLORS.textMuted, fontSize: 12, fontWeight: FONTS.semibold },
 
   // Category
@@ -561,37 +609,38 @@ const detail = StyleSheet.create({
     borderStyle: "dashed",
     gap: 4,
   },
-  openSlotIcon: { color: COLORS.accent, fontSize: 22 },
-  openSlotText: { color: COLORS.textMuted, fontSize: 11, textAlign: "center" },
+  openSlotText: { color: COLORS.textMuted, fontSize: TYPE.caption, textAlign: "center" },
 
   // Overlays
   overlay: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0,0,0,0.55)",
+    backgroundColor: COLORS.scrim,
     alignItems: "center",
     justifyContent: "center",
   } as const,
-  votedCheck: { color: COLORS.accent, fontSize: 44, fontWeight: FONTS.heavy },
   winnerBadge: {
     position: "absolute",
     bottom: 6,
     alignSelf: "center",
-    backgroundColor: "rgba(0,0,0,0.78)",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: COLORS.scrimHeavy,
     borderRadius: RADIUS.full,
     paddingHorizontal: 8,
     paddingVertical: 2,
   },
-  winnerText: { color: COLORS.accent, fontSize: 11, fontWeight: FONTS.heavy },
+  winnerText: { color: COLORS.warning, fontSize: TYPE.caption, fontWeight: FONTS.heavy },
   tapHint: {
     position: "absolute",
     bottom: 0,
     left: 0,
     right: 0,
-    backgroundColor: "rgba(166,255,0,0.18)",
+    backgroundColor: COLORS.accentSoft,
     paddingVertical: 5,
     alignItems: "center",
   },
-  tapHintText: { color: COLORS.accent, fontSize: 11, fontWeight: FONTS.bold },
+  tapHintText: { color: COLORS.accent, fontSize: TYPE.caption, fontWeight: FONTS.bold },
 
   // VS column
   vsCol: {
@@ -609,30 +658,18 @@ const detail = StyleSheet.create({
 
   // Vote bar
   voteBarSection: {
-    gap: 6,
     marginBottom: SPACING.md,
   },
-  voteBarLabels: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  pctA: { color: COLORS.accent, fontSize: 15, fontWeight: FONTS.heavy },
-  pctB: { color: COLORS.accent2, fontSize: 15, fontWeight: FONTS.heavy },
-  voteTotal: { color: COLORS.textMuted, fontSize: 12 },
-  voteBarTrack: {
-    flexDirection: "row",
-    height: 10,
-    borderRadius: RADIUS.full,
-    overflow: "hidden",
-    backgroundColor: COLORS.surface,
-  },
-  voteBarA: { backgroundColor: COLORS.accent },
-  voteBarB: { backgroundColor: COLORS.accent2 },
 
   // Actions
   actionSection: {
     marginBottom: SPACING.md,
+  },
+  voteHint: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    textAlign: "center",
+    marginBottom: SPACING.sm,
   },
   voteButtons: {
     flexDirection: "row",
@@ -669,16 +706,15 @@ const detail = StyleSheet.create({
 
   // Winner banner
   winnerBanner: {
-    backgroundColor: COLORS.accentFaint,
+    backgroundColor: COLORS.warningFaint,
     borderRadius: RADIUS.lg,
     borderWidth: 1,
-    borderColor: COLORS.accent,
+    borderColor: COLORS.warningBorder,
     padding: SPACING.lg,
     alignItems: "center",
     gap: SPACING.xs,
     marginBottom: SPACING.lg,
   },
-  winnerBannerIcon: { fontSize: 32 },
   winnerBannerLabel: {
     color: COLORS.textPrimary,
     fontSize: 18,
@@ -689,5 +725,30 @@ const detail = StyleSheet.create({
     color: COLORS.textMuted,
     fontSize: 13,
     textAlign: "center",
+  },
+
+  // Metadata
+  metaSection: {
+    borderTopWidth: 1,
+    borderTopColor: COLORS.cardBorder,
+    paddingTop: SPACING.md,
+    marginBottom: SPACING.lg,
+    gap: SPACING.sm,
+  },
+  metaRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  metaLabel: {
+    color: COLORS.textMuted,
+    fontSize: TYPE.small,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  metaValue: {
+    color: COLORS.textSecondary,
+    fontSize: TYPE.footnote,
+    fontWeight: FONTS.semibold,
   },
 });

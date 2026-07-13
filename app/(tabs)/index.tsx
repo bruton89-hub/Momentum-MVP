@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import {
   View,
   Text,
@@ -9,48 +9,93 @@ import {
   Alert,
   Modal,
   ViewToken,
+  LayoutChangeEvent,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { LinearGradient } from "expo-linear-gradient";
 import { useFocusEffect, useIsFocused } from "@react-navigation/native";
 import { useRouter } from "expo-router";
 import { useAuthStore } from "@/store/authStore";
 import { usePosts, useFollowingPosts } from "@/hooks/usePosts";
 import { useFollows } from "@/hooks/useFollows";
 import { createBattle } from "@/hooks/useBattles";
-import { COLORS, SPACING, FONTS } from "@/constants/theme";
+import { COLORS, SPACING, FONTS, SCRIMS } from "@/constants/theme";
 import PostCard from "@/components/PostCard";
 import BattlePickerModal from "@/components/BattlePickerModal";
 import EmptyState from "@/components/EmptyState";
+import FeedSkeleton from "@/components/FeedSkeleton";
 import GlowButton from "@/components/GlowButton";
-import LoadingSpinner from "@/components/LoadingSpinner";
+import IconButton from "@/components/IconButton";
+import DiscoveryTabs, { DiscoveryTabDef } from "@/components/DiscoveryTabs";
 import { isVideoMedia } from "@/utils/media";
 import type { Post } from "@/types";
 
-type FeedTab = "forYou" | "following";
+// ─── Discovery tabs ─────────────────────────────────────────────────────────────
+// "forYou" / "following" keep their original feeds. "battles" filters the
+// discovery pool to challenge-enabled posts. Sport tabs filter by post.sport.
+type FeedTab =
+  | "forYou"
+  | "following"
+  | "battles"
+  | "Football"
+  | "Basketball"
+  | "Wrestling"
+  | "Soccer"
+  | "Baseball";
+
+const DISCOVERY_TABS: readonly DiscoveryTabDef<FeedTab>[] = [
+  { key: "forYou", label: "For You", emoji: "🔥" },
+  { key: "following", label: "Following", emoji: "👥" },
+  { key: "battles", label: "Battles", emoji: "⚔️" },
+  { key: "Football", label: "Football", emoji: "🏈" },
+  { key: "Basketball", label: "Basketball", emoji: "🏀" },
+  { key: "Wrestling", label: "Wrestling", emoji: "🤼" },
+  { key: "Soccer", label: "Soccer", emoji: "⚽" },
+  { key: "Baseball", label: "Baseball", emoji: "⚾" },
+];
+
+const SPORT_TABS = new Set<FeedTab>([
+  "Football",
+  "Basketball",
+  "Wrestling",
+  "Soccer",
+  "Baseball",
+]);
+
+// Module-level so FlatList receives the same function identity every render.
+const keyExtractor = (item: Post) => item.id;
 
 export default function HomeScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const isFocused = useIsFocused();
   const userId  = useAuthStore((s) => s.userId);
   const profile = useAuthStore((s) => s.profile);
   const [feedTab, setFeedTab] = useState<FeedTab>("forYou");
+  // Active card (any media type) — gates ambient card animations (Challenge
+  // pulse, badge entrances). Distinct from activeVideoPostId, which only
+  // tracks playable videos for the single-mounted-player strategy.
+  const [activeCardId, setActiveCardId] = useState<string | null>(null);
   const [activeVideoPostId, setActiveVideoPostId] = useState<string | null>(null);
+  const [preparedVideoPostIds, setPreparedVideoPostIds] = useState<Set<string>>(
+    new Set()
+  );
   const [showWelcome, setShowWelcome] = useState(false);
+  // Full-screen page height — measured from the list container so each card
+  // exactly fills the space between the top of the screen and the tab bar.
+  const [pageHeight, setPageHeight] = useState(0);
   const viewabilityConfig = useRef({
     viewAreaCoveragePercentThreshold: 65,
   }).current;
 
-  // ── For You feed ─────────────────────────────────────────────────────────────
-  const {
-    posts: fyPosts,
-    likedIds,
-    loading:    fyLoading,
-    refreshing: fyRefreshing,
-    error:      fyError,
-    refresh:    fyRefresh,
-    handleLike,
-  } = usePosts(userId);
+  const handleListLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      const h = Math.round(event.nativeEvent.layout.height);
+      setPageHeight((prev) => (prev === h ? prev : h));
+    },
+    []
+  );
 
   // ── Follows state ─────────────────────────────────────────────────────────────
   const {
@@ -60,6 +105,19 @@ export default function HomeScreen() {
     unfollow,
     refresh: refreshFollows,
   } = useFollows(userId);
+
+  // ── For You feed ─────────────────────────────────────────────────────────────
+  const {
+    posts: fyPosts,
+    likedIds,
+    loading:    fyLoading,
+    refreshing: fyRefreshing,
+    error:      fyError,
+    refresh:    fyRefresh,
+    loadMore:   fyLoadMore,
+    hasMore:    fyHasMore,
+    handleLike,
+  } = usePosts(userId, followedIds);
 
   // ── Following feed ────────────────────────────────────────────────────────────
   const {
@@ -83,30 +141,42 @@ export default function HomeScreen() {
   followingRefreshRef.current = followingRefresh;
   const refreshFollowsRef = useRef(refreshFollows);
   refreshFollowsRef.current = refreshFollows;
+  const hasFocusedRef = useRef(false);
 
   useFocusEffect(
     useCallback(() => {
-      __DEV__ && console.log("[Home] useFocusEffect fired — feedTab:", feedTab);
+      if (!hasFocusedRef.current) {
+        hasFocusedRef.current = true;
+        return;
+      }
       // Always re-fetch the follows list so Follow state is current after
       // navigating away (e.g. tapping Follow on the player profile screen).
       refreshFollowsRef.current();
-      // Refresh whichever feed tab is active.
-      if (feedTab === "forYou") fyRefreshRef.current();
-      else followingRefreshRef.current();
+      // Refresh whichever feed source backs the active tab.
+      if (feedTab === "following") followingRefreshRef.current();
+      else fyRefreshRef.current();
     }, [feedTab]) // ← only feedTab; all callbacks accessed via refs
   );
 
   // ── Active feed derivation ────────────────────────────────────────────────────
-  const isForYou       = feedTab === "forYou";
-  const activePosts    = isForYou ? fyPosts       : followingPosts;
-  const activeLoading  = isForYou ? fyLoading      : followingLoading;
-  const activeRefresh  = isForYou ? fyRefresh      : followingRefresh;
-  const activeRefreshing = isForYou ? fyRefreshing : followingRefreshing;
-  const activeError    = isForYou ? fyError        : null;
+  // "battles" and sport tabs are client-side filters over the discovery pool —
+  // no extra queries, no change to the caching strategy.
+  const isFollowingTab = feedTab === "following";
+  const activePosts = useMemo(() => {
+    if (isFollowingTab) return followingPosts;
+    if (feedTab === "battles") return fyPosts.filter((p) => p.battleEnabled);
+    if (SPORT_TABS.has(feedTab)) {
+      return fyPosts.filter(
+        (p) => p.sport?.toLowerCase() === feedTab.toLowerCase()
+      );
+    }
+    return fyPosts;
+  }, [feedTab, fyPosts, followingPosts, isFollowingTab]);
 
-  useEffect(() => {
-    __DEV__ && console.log("[Home] activePosts passed to FlatList:", activePosts.length, "feedTab:", feedTab);
-  }, [activePosts, feedTab]);
+  const activeLoading    = isFollowingTab ? followingLoading   : fyLoading;
+  const activeRefresh    = isFollowingTab ? followingRefresh   : fyRefresh;
+  const activeRefreshing = isFollowingTab ? followingRefreshing : fyRefreshing;
+  const activeError      = isFollowingTab ? null : fyError;
 
   useEffect(() => {
     if (!userId) return;
@@ -133,7 +203,6 @@ export default function HomeScreen() {
   // ── Follow / Unfollow ─────────────────────────────────────────────────────────
   const handleFollow = useCallback(
     (targetUserId: string, isCurrentlyFollowing: boolean) => {
-      __DEV__ && console.log("[Home] handleFollow called — targetUserId:", targetUserId, "isCurrentlyFollowing:", isCurrentlyFollowing);
       if (isCurrentlyFollowing) unfollow(targetUserId);
       else follow(targetUserId);
     },
@@ -151,7 +220,6 @@ export default function HomeScreen() {
 
   const handleBattle = useCallback(
     async (post: Post) => {
-      __DEV__ && console.log("[Home] handleBattle called — postId:", post.id, "postUserId:", post.userId, "currentUserId:", userId);
       if (!userId || !profile) {
         console.warn("[Home] handleBattle aborted — missing userId or profile");
         return;
@@ -191,6 +259,12 @@ export default function HomeScreen() {
 
   const handleViewableItemsChanged = useRef(
     ({ viewableItems }: { viewableItems: ViewToken[] }) => {
+      // Active card = first viewable item of any media type. setState with an
+      // unchanged value is a no-op in React, so this doesn't add re-renders
+      // beyond the existing per-page-change cadence.
+      const firstViewable = viewableItems.find(({ isViewable }) => isViewable);
+      setActiveCardId(firstViewable?.item.id ?? null);
+
       const activeVideo = viewableItems.find(
         ({ item, isViewable }) =>
           isViewable &&
@@ -198,85 +272,218 @@ export default function HomeScreen() {
           !!item.mediaUrl?.trim()
       );
       setActiveVideoPostId(activeVideo?.item.id ?? null);
+      const activeIndex = activeVideo?.index ?? -1;
+      const prepared = new Set<string>();
+      if (activeVideo?.item.id) prepared.add(activeVideo.item.id);
+      const nextPost = activeIndex >= 0 ? activePostsRef.current[activeIndex + 1] : null;
+      if (
+        nextPost &&
+        isVideoMedia(nextPost.mediaUrl, nextPost.mediaType) &&
+        nextPost.mediaUrl?.trim()
+      ) {
+        prepared.add(nextPost.id);
+      }
+      // PERF: viewability fires on every scroll tick; bail out when the
+      // prepared set is unchanged so HomeScreen doesn't re-render per tick
+      // (a new Set identity would otherwise force it even with equal contents).
+      setPreparedVideoPostIds((prev) => {
+        if (
+          prev.size === prepared.size &&
+          [...prepared].every((id) => prev.has(id))
+        ) {
+          return prev;
+        }
+        return prepared;
+      });
     }
   ).current;
+  const activePostsRef = useRef(activePosts);
+  activePostsRef.current = activePosts;
 
   useEffect(() => {
+    setActiveCardId(null);
     setActiveVideoPostId(null);
+    setPreparedVideoPostIds(new Set());
   }, [feedTab]);
 
-  // ── Loading ───────────────────────────────────────────────────────────────────
-  if (activeLoading) {
-    return <LoadingSpinner fullscreen label="Loading feed…" />;
-  }
+  // PERF: stable renderItem — an inline arrow got a fresh identity on every
+  // HomeScreen render, forcing VirtualizedList to re-render its cell wrappers
+  // even when PostCard's memo would have bailed. Recreates only when a prop
+  // that genuinely feeds the cards changes.
+  const authorAvatar = profile?.avatarUrl || profile?.avatar;
+  const renderItem = useCallback(
+    ({ item }: { item: Post }) => (
+      <PostCard
+        post={item}
+        height={pageHeight}
+        isLiked={likedIds.has(item.id)}
+        onLike={handleLike}
+        currentUserId={userId}
+        isFollowing={followedIds.has(item.userId)}
+        onFollow={handleFollow}
+        onBattle={handleBattle}
+        isBattling={startingBattlePostId === item.id}
+        authorAvatarOverride={item.userId === userId ? authorAvatar : undefined}
+        enableVideoPlayback
+        isActiveVideo={isFocused && activeVideoPostId === item.id}
+        isActiveCard={isFocused && activeCardId === item.id}
+        mountVideoPlayer={preparedVideoPostIds.has(item.id)}
+      />
+    ),
+    [
+      pageHeight,
+      likedIds,
+      handleLike,
+      userId,
+      followedIds,
+      handleFollow,
+      handleBattle,
+      startingBattlePostId,
+      authorAvatar,
+      isFocused,
+      activeVideoPostId,
+      activeCardId,
+      preparedVideoPostIds,
+    ]
+  );
+
+  // Full-screen pages: fixed layout lets the virtualizer compute offsets
+  // without measuring — required for smooth paging with windowSize kept small.
+  const getItemLayout = useCallback(
+    (_data: ArrayLike<Post> | null | undefined, index: number) => ({
+      length: pageHeight,
+      offset: pageHeight * index,
+      index,
+    }),
+    [pageHeight]
+  );
+
+  // ── Empty state per tab — encouraging, sports-first, with a CTA ──────────────
+  const emptyState = useMemo(() => {
+    if (isFollowingTab) {
+      return (
+        <EmptyState
+          icon="👥"
+          title="Your locker room is empty"
+          subtitle="Follow athletes to build your feed."
+          actionLabel="Discover athletes"
+          onAction={() => setFeedTab("forYou")}
+        />
+      );
+    }
+    if (feedTab === "battles") {
+      return (
+        <EmptyState
+          icon="⚔️"
+          title="No open challenges yet"
+          subtitle="Challenge another athlete and claim the first win."
+          actionLabel="Go to Battles"
+          onAction={() => router.push("/battles" as never)}
+        />
+      );
+    }
+    if (SPORT_TABS.has(feedTab)) {
+      const tab = DISCOVERY_TABS.find((t) => t.key === feedTab);
+      return (
+        <EmptyState
+          icon={tab?.emoji ?? "🏟️"}
+          title={`Be the first ${tab?.label ?? ""} athlete in your area`}
+          subtitle="Post a highlight and own this feed."
+          actionLabel="Upload your highlight"
+          onAction={() => router.push("/create" as never)}
+        />
+      );
+    }
+    return (
+      <EmptyState
+        icon="🎬"
+        title="Upload your first highlight"
+        subtitle="Every legend starts with clip one."
+        actionLabel="Create your first highlight"
+        onAction={() => router.push("/create" as never)}
+      />
+    );
+  }, [feedTab, isFollowingTab, router]);
+
+  const headerHeight = insets.top + 84;
 
   // ── Error (For You only) ──────────────────────────────────────────────────────
-  if (activeError) {
+  if (activeError && activePosts.length === 0 && !activeLoading) {
     return (
-      <SafeAreaView style={styles.safe} edges={["top"]}>
-        <FeedHeader feedTab={feedTab} onTabChange={setFeedTab} />
-        <EmptyState
-          icon="⚠️"
-          title="Something went wrong"
-          subtitle={activeError}
-          actionLabel="Retry"
-          onAction={activeRefresh}
+      <View style={styles.safe}>
+        <View style={{ paddingTop: headerHeight, flex: 1 }}>
+          <EmptyState
+            icon="⚠️"
+            title="Something went wrong"
+            subtitle={activeError}
+            actionLabel="Retry"
+            onAction={activeRefresh}
+          />
+        </View>
+        <FeedHeader
+          feedTab={feedTab}
+          onTabChange={setFeedTab}
+          topInset={insets.top}
         />
-      </SafeAreaView>
+      </View>
     );
   }
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
-      <FeedHeader feedTab={feedTab} onTabChange={setFeedTab} />
-
-      <FlatList<Post>
-        data={activePosts}
-        keyExtractor={(item) => item.id}
-        renderItem={({ item }) => (
-          <PostCard
-            post={item}
-            isLiked={likedIds.has(item.id)}
-            onLike={handleLike}
-            currentUserId={userId}
-            isFollowing={followedIds.has(item.userId)}
-            onFollow={handleFollow}
-            onBattle={handleBattle}
-            isBattling={startingBattlePostId === item.id}
-            enableVideoPlayback
-            isActiveVideo={isFocused && activeVideoPostId === item.id}
+    <View style={styles.safe}>
+      <View style={styles.listContainer} onLayout={handleListLayout}>
+        {pageHeight > 0 ? (
+          <FlatList<Post>
+            data={activePosts}
+            keyExtractor={keyExtractor}
+            renderItem={renderItem}
+            pagingEnabled
+            getItemLayout={getItemLayout}
+            onViewableItemsChanged={handleViewableItemsChanged}
+            viewabilityConfig={viewabilityConfig}
+            onEndReached={!isFollowingTab && fyHasMore ? fyLoadMore : undefined}
+            onEndReachedThreshold={0.6}
+            initialNumToRender={2}
+            maxToRenderPerBatch={3}
+            windowSize={5}
+            refreshControl={
+              <RefreshControl
+                refreshing={activeRefreshing}
+                onRefresh={activeRefresh}
+                tintColor={COLORS.accent}
+                colors={[COLORS.accent]}
+                progressViewOffset={headerHeight}
+              />
+            }
+            ListEmptyComponent={
+              activeLoading ? <FeedSkeleton height={pageHeight} /> : emptyState
+            }
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={
+              activePosts.length === 0
+                ? { flex: 1, paddingTop: activeLoading ? 0 : headerHeight }
+                : undefined
+            }
           />
+        ) : (
+          <FeedSkeleton />
         )}
-        onViewableItemsChanged={handleViewableItemsChanged}
-        viewabilityConfig={viewabilityConfig}
-        refreshControl={
-          <RefreshControl
-            refreshing={activeRefreshing}
-            onRefresh={activeRefresh}
-            tintColor={COLORS.accent}
-            colors={[COLORS.accent]}
-          />
-        }
-        ListEmptyComponent={
-          isForYou ? (
-            <EmptyState
-              icon="🎬"
-              title="No highlights yet. Be the first to post."
-              subtitle=""
-              actionLabel="Create your first highlight"
-              onAction={() => router.push("/create" as never)}
-            />
-          ) : (
-            <EmptyState
-              icon="👥"
-              title="Your feed is empty"
-              subtitle="Follow athletes to build your feed."
-            />
-          )
-        }
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={activePosts.length === 0 ? { flex: 1 } : undefined}
+      </View>
+
+      {/* Overlay header — logo + horizontally scrolling discovery pills */}
+      <FeedHeader
+        feedTab={feedTab}
+        onTabChange={setFeedTab}
+        topInset={insets.top}
       />
+
+      {activeError && activePosts.length > 0 ? (
+        <View style={styles.refreshError}>
+          <Text style={styles.refreshErrorText}>
+            Couldn’t refresh. Showing saved highlights.
+          </Text>
+        </View>
+      ) : null}
 
       {/* Challenge picker modal — only mounts when a target post is set */}
       <BattlePickerModal
@@ -294,77 +501,95 @@ export default function HomeScreen() {
             <Text style={styles.welcomeTitle}>Welcome to Momentum</Text>
             <Text style={styles.welcomeCopy}>Post highlights.{"\n"}Start battles.{"\n"}Build your name.</Text>
             <GlowButton label="Create First Post" onPress={handleCreateFirstPost} size="lg" />
-            <Pressable onPress={dismissWelcome} style={styles.skipWelcome}>
+            <Pressable
+              onPress={dismissWelcome}
+              accessibilityRole="button"
+              accessibilityLabel="Skip welcome"
+              style={({ pressed }) => [styles.skipWelcome, pressed && { opacity: 0.7 }]}
+            >
               <Text style={styles.skipWelcomeText}>Skip</Text>
             </Pressable>
           </View>
         </View>
       </Modal>
-    </SafeAreaView>
+    </View>
   );
 }
 
-// ─── Feed header (extracted so tab switches don't remount the list) ────────────
+// ─── Feed header (overlay — floats over the full-screen video) ─────────────────
 function FeedHeader({
   feedTab,
   onTabChange,
+  topInset,
 }: {
   feedTab: FeedTab;
   onTabChange: (tab: FeedTab) => void;
+  topInset: number;
 }) {
   return (
-    <View style={styles.header}>
-      {/* Logo row */}
-      <View style={styles.logoRow}>
-        <View style={styles.logoLockup}>
-          <View style={styles.logoMBadge}>
-            <Text style={styles.logoMLetter}>M</Text>
+    <View style={styles.headerOverlay} pointerEvents="box-none">
+      <LinearGradient
+        colors={SCRIMS.top}
+        style={StyleSheet.absoluteFillObject}
+        pointerEvents="none"
+      />
+      <View style={{ paddingTop: topInset + 2 }} pointerEvents="box-none">
+        {/* Compact brand row */}
+        <View style={styles.logoRow} pointerEvents="box-none">
+          <View style={styles.logoLockup} accessible accessibilityRole="header" accessibilityLabel="Momentum">
+            <View style={styles.logoMBadge}>
+              <Text style={styles.logoMLetter}>M</Text>
+            </View>
+            <Text style={styles.logoText}>MOMENTUM</Text>
           </View>
-          <Text style={styles.logoText}>MOMENTUM</Text>
+          <IconButton icon="bell" accessibilityLabel="Notifications" onPress={() => undefined} />
         </View>
-        <Pressable style={styles.bellBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-          <Text style={styles.bellIcon}>🔔</Text>
-        </Pressable>
-      </View>
 
-      {/* For You / Following tabs */}
-      <View style={styles.tabs}>
-        <Pressable
-          onPress={() => onTabChange("forYou")}
-          style={styles.tab}
-        >
-          <Text style={[styles.tabText, feedTab === "forYou" && styles.tabTextActive]}>
-            For You
-          </Text>
-          <View style={[styles.tabUnderline, feedTab === "forYou" && styles.tabUnderlineActive]} />
-        </Pressable>
-        <Pressable
-          onPress={() => onTabChange("following")}
-          style={styles.tab}
-        >
-          <Text style={[styles.tabText, feedTab === "following" && styles.tabTextActive]}>
-            Following
-          </Text>
-          <View style={[styles.tabUnderline, feedTab === "following" && styles.tabUnderlineActive]} />
-        </Pressable>
+        {/* Horizontally scrolling discovery tabs */}
+        <DiscoveryTabs
+          tabs={DISCOVERY_TABS}
+          activeKey={feedTab}
+          onChange={onTabChange}
+        />
       </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: COLORS.background },
-  header: {
-    paddingTop: SPACING.sm,
-    paddingBottom: 0,
-    paddingHorizontal: SPACING.lg,
-    backgroundColor: COLORS.background,
+  safe: { flex: 1, backgroundColor: COLORS.black },
+  listContainer: { flex: 1 },
+  headerOverlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    paddingBottom: SPACING.sm,
+    zIndex: 10,
+  },
+  refreshError: {
+    position: "absolute",
+    left: SPACING.lg,
+    right: SPACING.lg,
+    bottom: SPACING.md,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.cardBorder,
+    backgroundColor: COLORS.card,
+    padding: SPACING.sm,
+  },
+  refreshErrorText: {
+    color: COLORS.textSecondary,
+    fontSize: 12,
+    textAlign: "center",
   },
   logoRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    marginBottom: SPACING.md,
+    paddingHorizontal: SPACING.lg,
+    marginBottom: SPACING.xs,
+    minHeight: 36,
   },
   logoLockup: {
     flexDirection: "row",
@@ -373,69 +598,30 @@ const styles = StyleSheet.create({
   },
   logoMBadge: {
     // Matches brand guide M badge: lime rounded square
-    width: 32,
-    height: 32,
-    borderRadius: 7,
+    width: 26,
+    height: 26,
+    borderRadius: 6,
     backgroundColor: COLORS.accent,
     alignItems: "center",
     justifyContent: "center",
   },
   logoMLetter: {
     color: COLORS.black,
-    fontSize: 20,
+    fontSize: 16,
     fontWeight: FONTS.heavy,
     // No italic — the brand guide M is upright and ultra-bold
     includeFontPadding: false,
-    lineHeight: 22,
+    lineHeight: 18,
   },
   logoText: {
     color: COLORS.textPrimary,
-    fontSize: 20,
+    fontSize: 16,
     fontWeight: FONTS.heavy,
     letterSpacing: 2,
     includeFontPadding: false,
-  },
-  bellBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: COLORS.surface,
-    borderWidth: 1,
-    borderColor: COLORS.cardBorder,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  bellIcon: { fontSize: 16 },
-  tabs: {
-    flexDirection: "row",
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.cardBorder,
-  },
-  tab: {
-    paddingHorizontal: SPACING.lg,
-    alignItems: "center",
-    paddingTop: SPACING.sm + 2,
-    paddingBottom: 0,
-  },
-  tabText: {
-    color: COLORS.textMuted,
-    fontSize: 15,
-    fontWeight: FONTS.semibold,
-    letterSpacing: 0.3,
-  },
-  tabTextActive: {
-    color: COLORS.textPrimary,
-    fontWeight: FONTS.bold,
-  },
-  tabUnderline: {
-    width: "100%",
-    height: 3,
-    borderRadius: 3,
-    backgroundColor: COLORS.transparent,
-    marginTop: SPACING.sm + 2,
-  },
-  tabUnderlineActive: {
-    backgroundColor: COLORS.accent,
+    textShadowColor: "rgba(0,0,0,0.5)",
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
   },
   welcomeOverlay: {
     flex: 1,

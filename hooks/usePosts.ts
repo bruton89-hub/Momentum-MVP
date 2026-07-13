@@ -1,10 +1,11 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import {
   collection,
   query,
   orderBy,
   limit,
   getDocs,
+  startAfter,
   addDoc,
   where,
   Timestamp,
@@ -13,17 +14,132 @@ import {
 import { ref, uploadBytesResumable, getDownloadURL } from "firebase/storage";
 import { httpsCallable } from "firebase/functions";
 import { Platform } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { db, functions, storage } from "@/config/firebase";
 import {
   fetchPostsByUser,
   fetchPostsByUsers,
   normalizePost,
+  timestampToMs,
 } from "@/services/postRepository";
 import type { Post } from "@/types";
 import type { PostVideoEdit } from "@/constants/videoEditing";
 
 const POSTS_PER_PAGE = 20;
+const DISCOVERY_INITIAL_LIMIT = 24;
+const DISCOVERY_BACKGROUND_LIMIT = 56;
+const DISCOVERY_PAGE_SIZE = 12;
+const FEED_CACHE_PREFIX = "momentum:feed:v1";
 export const MAX_POST_MEDIA_BYTES = 50 * 1024 * 1024;
+
+function feedCacheKey(userId?: string | null): string {
+  return `${FEED_CACHE_PREFIX}:${userId || "guest"}`;
+}
+
+function renderablePosts(posts: Post[]): Post[] {
+  const unique = new Map<string, Post>();
+  posts.forEach((post) => {
+    if (post.mediaUrl && !unique.has(post.id)) unique.set(post.id, post);
+  });
+  return Array.from(unique.values());
+}
+
+async function readCachedFeed(userId?: string | null): Promise<Post[]> {
+  try {
+    const value = await AsyncStorage.getItem(feedCacheKey(userId));
+    if (!value) return [];
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return renderablePosts(
+      parsed
+        .filter(
+          (item): item is Record<string, unknown> =>
+            !!item && typeof item === "object" && typeof item.id === "string"
+        )
+        .map((item) => normalizePost(item.id as string, item))
+    );
+  } catch {
+    return [];
+  }
+}
+
+function writeCachedFeed(
+  posts: Post[],
+  userId?: string | null
+): Promise<void> {
+  return AsyncStorage.setItem(
+    feedCacheKey(userId),
+    JSON.stringify(posts)
+  ).catch(() => undefined);
+}
+
+function seededUnit(seed: number, value: string): number {
+  let hash = seed ^ 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) / 4294967296;
+}
+
+function createDiscoverySeed(): number {
+  return Math.floor(Math.random() * 2147483647);
+}
+
+function rankDiscoveryPosts(
+  posts: Post[],
+  seed: number,
+  currentUserId: string | null | undefined,
+  followedIds: Set<string>
+): Post[] {
+  const timestamps = posts.map((post) => timestampToMs(post.createdAt));
+  const newestTimestamp = Math.max(...timestamps, 1);
+  const oldestTimestamp = Math.min(...timestamps, newestTimestamp);
+  const timestampSpan = Math.max(1, newestTimestamp - oldestTimestamp);
+  const candidates = posts.map((post) => {
+    const recency =
+      (timestampToMs(post.createdAt) - oldestTimestamp) / timestampSpan;
+    const lowVisibility = 1 / Math.sqrt(Math.max(0, post.likesCount) + 1);
+    const unfamiliarAthlete =
+      post.userId !== currentUserId && !followedIds.has(post.userId) ? 1 : 0;
+
+    return {
+      post,
+      score:
+        seededUnit(seed, post.id) * 0.45 +
+        recency * 0.25 +
+        lowVisibility * 0.2 +
+        unfamiliarAthlete * 0.1,
+    };
+  });
+  const ranked: Post[] = [];
+  const authorCounts = new Map<string, number>();
+
+  // Seeded scoring keeps the order stable for the session. The author penalty
+  // prevents prolific athletes from filling consecutive discovery slots.
+  while (candidates.length > 0) {
+    let bestIndex = 0;
+    let bestAdjustedScore = Number.NEGATIVE_INFINITY;
+    candidates.forEach((candidate, index) => {
+      const authorCount = authorCounts.get(candidate.post.userId) ?? 0;
+      const repeatsPreviousAuthor =
+        ranked[ranked.length - 1]?.userId === candidate.post.userId;
+      const adjustedScore =
+        candidate.score -
+        authorCount * 0.16 -
+        (repeatsPreviousAuthor ? 0.35 : 0);
+      if (adjustedScore > bestAdjustedScore) {
+        bestAdjustedScore = adjustedScore;
+        bestIndex = index;
+      }
+    });
+    const [{ post }] = candidates.splice(bestIndex, 1);
+    ranked.push(post);
+    authorCounts.set(post.userId, (authorCounts.get(post.userId) ?? 0) + 1);
+  }
+
+  return ranked;
+}
 
 type SetPostLikeResult = {
   postId: string;
@@ -147,18 +263,32 @@ export interface CreatePostInput {
   battleEnabled: boolean;
   originalMediaUrl?: string;
   videoEdit?: PostVideoEdit;
+  // ── Optional athlete context (written only when the user provides values;
+  //    read back by normalizePost — fully backward-compatible) ──────────────
+  sport?: string;
+  position?: string;
+  school?: string;
+  teamName?: string;
 }
 
 export async function createPost(input: CreatePostInput): Promise<string> {
   const {
     originalMediaUrl,
     videoEdit,
+    sport,
+    position,
+    school,
+    teamName,
     ...requiredInput
   } = input;
   const payload = {
     ...requiredInput,
     ...(originalMediaUrl ? { originalMediaUrl } : {}),
     ...(videoEdit ? { videoEdit } : {}),
+    ...(sport?.trim() ? { sport: sport.trim() } : {}),
+    ...(position?.trim() ? { position: position.trim() } : {}),
+    ...(school?.trim() ? { school: school.trim() } : {}),
+    ...(teamName?.trim() ? { teamName: teamName.trim() } : {}),
     // Write all known userId aliases so docs are found regardless of which
     // field name old or future queries use.
     authorId: input.userId,
@@ -166,6 +296,8 @@ export async function createPost(input: CreatePostInput): Promise<string> {
     // Write avatarUrl explicitly even if input already includes it via spread,
     // so both avatar field names are always present.
     avatarUrl: input.avatarUrl ?? input.userAvatar ?? "",
+    authorAvatar: input.avatarUrl ?? input.userAvatar ?? "",
+    userAvatar: input.avatarUrl ?? input.userAvatar ?? "",
     likesCount: 0,
     // Use client-side Timestamp.now() instead of serverTimestamp() so that
     // createdAt is immediately non-null in the local Firestore cache.
@@ -216,16 +348,26 @@ export async function fetchLikedPostIds(
 
 // ─── Hook: paginated home feed ────────────────────────────────────────────────
 
-export function usePosts(currentUserId?: string | null) {
+export function usePosts(
+  currentUserId?: string | null,
+  followedIds: Set<string> = new Set()
+) {
   const [posts, setPosts] = useState<Post[]>([]);
+  const [visibleCount, setVisibleCount] = useState(DISCOVERY_PAGE_SIZE);
   const [likedIds, setLikedIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const discoverySeedRef = useRef(createDiscoverySeed());
+  const postsRef = useRef<Post[]>([]);
+  const requestIdRef = useRef(0);
+  const followedIdsRef = useRef(followedIds);
+  followedIdsRef.current = followedIds;
 
   const fetchPosts = useCallback(async (isRefresh = false) => {
+    const requestId = ++requestIdRef.current;
     if (isRefresh) setRefreshing(true);
-    else setLoading(true);
+    else if (postsRef.current.length === 0) setLoading(true);
     setError(null);
 
     try {
@@ -233,49 +375,127 @@ export function usePosts(currentUserId?: string | null) {
         query(
           collection(db, "posts"),
           orderBy("createdAt", "desc"),
-          limit(POSTS_PER_PAGE)
+          limit(DISCOVERY_INITIAL_LIMIT)
         )
       );
-      const liked = currentUserId
-        ? await fetchLikedPostIds(
-            currentUserId,
-            postsSnap.docs.map((postDoc) => postDoc.id)
-          )
-        : new Set<string>();
+      if (requestId !== requestIdRef.current) return;
 
-      const fetched: Post[] = postsSnap.docs
+      const initialPosts = renderablePosts(
+        postsSnap.docs
         .map((d) => normalizePost(d.id, d.data() as Record<string, unknown>))
-        .filter((p) => {
-          // Only reject docs that are truly unrenderable — no media to display.
-          // userId is now resolved from authorId/uid/ownerId aliases, so most
-          // "hasUserId: false" rejections should be gone after the normalizePost fix.
-          const keep = !!p.mediaUrl;
-          if (!keep && __DEV__) {
-            console.warn("[fetchPosts] rejected doc (no mediaUrl)", p.id,
-              { hasMediaUrl: !!p.mediaUrl, hasUserId: !!p.userId });
-          }
-          return keep;
-        });
-      setPosts(fetched);
-      setLikedIds(liked);
-    } catch (err: unknown) {
-      // Only surfaces if the posts query itself fails (not likes).
-      // On permission-denied or missing collection, show empty feed.
-      const code = (err as { code?: string })?.code ?? "";
-      console.error("[fetchPosts] query error", { code, err });
-      if (code === "permission-denied" || code === "unavailable") {
-        setPosts([]);
-      } else {
-        setError(err instanceof Error ? err.message : "Failed to load posts");
-      }
-    } finally {
+      );
+
+      if (isRefresh) discoverySeedRef.current = createDiscoverySeed();
+
+      const rankedInitial = rankDiscoveryPosts(
+        initialPosts,
+        discoverySeedRef.current,
+        currentUserId,
+        followedIdsRef.current
+      );
+      postsRef.current = rankedInitial;
+      setPosts(rankedInitial);
+      setVisibleCount(DISCOVERY_INITIAL_LIMIT);
       setLoading(false);
       setRefreshing(false);
+      void writeCachedFeed(rankedInitial, currentUserId);
+
+      // Likes are presentation metadata; never hold the first feed paint for them.
+      if (currentUserId) {
+        void fetchLikedPostIds(
+          currentUserId,
+          initialPosts.map((post) => post.id)
+        ).then((liked) => {
+          if (requestId === requestIdRef.current) {
+            setLikedIds((previous) => new Set([...previous, ...liked]));
+          }
+        });
+      }
+
+      // Expand the candidate pool after the first page is already usable. Using
+      // the initial query's cursor avoids rereading those first 24 documents.
+      const cursor = postsSnap.docs[postsSnap.docs.length - 1];
+      if (cursor && postsSnap.docs.length === DISCOVERY_INITIAL_LIMIT) {
+        void getDocs(
+          query(
+            collection(db, "posts"),
+            orderBy("createdAt", "desc"),
+            startAfter(cursor),
+            limit(DISCOVERY_BACKGROUND_LIMIT)
+          )
+        )
+          .then(async (backgroundSnap) => {
+            if (requestId !== requestIdRef.current) return;
+            const existingIds = new Set(rankedInitial.map((post) => post.id));
+            const additional = renderablePosts(
+              backgroundSnap.docs.map((postDoc) =>
+                normalizePost(
+                  postDoc.id,
+                  postDoc.data() as Record<string, unknown>
+                )
+              )
+            ).filter((post) => !existingIds.has(post.id));
+            const rankedAdditional = rankDiscoveryPosts(
+              additional,
+              discoverySeedRef.current,
+              currentUserId,
+              followedIdsRef.current
+            );
+            const expanded = [...rankedInitial, ...rankedAdditional];
+            postsRef.current = expanded;
+            setPosts(expanded);
+            await writeCachedFeed(expanded, currentUserId);
+
+            if (currentUserId && additional.length > 0) {
+              const backgroundLikes = await fetchLikedPostIds(
+                currentUserId,
+                additional.map((post) => post.id)
+              );
+              if (requestId === requestIdRef.current) {
+                setLikedIds((previous) =>
+                  new Set([...previous, ...backgroundLikes])
+                );
+              }
+            }
+          })
+          .catch((backgroundError) => {
+            __DEV__ &&
+              console.warn("[fetchPosts] background expansion failed", backgroundError);
+          });
+      }
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code ?? "";
+      console.error("[fetchPosts] query error", { code, err });
+      if (postsRef.current.length === 0 && code === "permission-denied") {
+        setPosts([]);
+      }
+      setError(err instanceof Error ? err.message : "Failed to refresh feed");
+    } finally {
+      if (requestId === requestIdRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, [currentUserId]);
 
   useEffect(() => {
-    fetchPosts();
+    let cancelled = false;
+    setLoading(true);
+    setLikedIds(new Set());
+    readCachedFeed(currentUserId).then((cached) => {
+      if (cancelled) return;
+      if (cached.length > 0) {
+        postsRef.current = cached;
+        setPosts(cached);
+        setVisibleCount(DISCOVERY_INITIAL_LIMIT);
+        setLoading(false);
+      }
+      void fetchPosts();
+    });
+    return () => {
+      cancelled = true;
+      requestIdRef.current += 1;
+    };
   }, [fetchPosts]);
 
   // ── Like toggle ───────────────────────────────────────────────────────────────
@@ -289,7 +509,6 @@ export function usePosts(currentUserId?: string | null) {
 
   const handleLike = useCallback(
     async (postId: string) => {
-      __DEV__ && console.log("[handleLike] called — postId:", postId, "currentUserId:", currentUserId);
       if (!currentUserId) {
         console.warn("[handleLike] aborted — no currentUserId");
         return;
@@ -355,14 +574,32 @@ export function usePosts(currentUserId?: string | null) {
   // Stable refresh reference — wrapped so its identity only changes when
   // fetchPosts itself changes (i.e. when currentUserId changes), not every render.
   const refresh = useCallback(() => fetchPosts(true), [fetchPosts]);
+  const loadMore = useCallback(() => {
+    setVisibleCount((count) =>
+      Math.min(count + DISCOVERY_PAGE_SIZE, posts.length)
+    );
+  }, [posts.length]);
+
+  // PERF: memoize the visible window. `posts.slice()` in the return object
+  // created a brand-new array identity on EVERY render of the host screen,
+  // which invalidated downstream useMemo/useEffect deps (e.g. the Home feed's
+  // activePosts derivation) and forced FlatList to re-diff its data prop even
+  // when nothing changed. Item references were stable, so cards didn't
+  // re-render — but the array identity churn was pure waste.
+  const visiblePosts = useMemo(
+    () => posts.slice(0, visibleCount),
+    [posts, visibleCount]
+  );
 
   return {
-    posts,
+    posts: visiblePosts,
     likedIds,
     loading,
     refreshing,
     error,
     refresh,
+    loadMore,
+    hasMore: visibleCount < posts.length,
     handleLike,
   };
 }
@@ -432,7 +669,6 @@ export function useFollowingPosts(
       }
 
       if (fetchInFlightRef.current) {
-        __DEV__ && console.log("[followingFeed] fetch skipped — request already in flight");
         return;
       }
 
@@ -442,8 +678,6 @@ export function useFollowingPosts(
       else setLoading(true);
 
       try {
-        __DEV__ && console.log("[followingFeed] followedIds:", Array.from(followedIds));
-
         // No one followed → return empty immediately
         if (followedIds.size === 0) {
           setPosts([]);
@@ -454,8 +688,6 @@ export function useFollowingPosts(
           followedIds,
           POSTS_PER_PAGE
         );
-        __DEV__ && console.log("[followingFeed] unique count:", unique.length);
-        __DEV__ && console.log("[followingFeed] unique ids:", unique.map((p) => p.id));
 
         // Replace results. Do not append: focus refreshes and followed-id changes
         // should never stack duplicate batches into existing feed state.

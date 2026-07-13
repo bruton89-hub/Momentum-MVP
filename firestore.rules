@@ -88,6 +88,23 @@ service cloud.firestore {
       allow create, update, delete: if false;
     }
 
+    // ─── Comments ──────────────────────────────────────────────────────────────
+    // Flat, post-scoped comments (no replies, no edits).
+    // Fields: postId, userId, username, avatar, text, createdAt
+    match /comments/{commentId} {
+      allow read: if isSignedIn();
+      // Author-owned create with basic shape validation.
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.postId is string
+        && request.resource.data.postId.size() > 0
+        && request.resource.data.text is string
+        && request.resource.data.text.size() > 0
+        && request.resource.data.text.size() <= 300;
+      // Authors may delete their own comments. Comments are immutable.
+      allow delete: if isOwner(resource.data.userId);
+    }
+
     // ─── Follows ───────────────────────────────────────────────────────────────
     // Doc ID convention: {followerId}_{followingId}
     // Fields: followerId, followingId, createdAt

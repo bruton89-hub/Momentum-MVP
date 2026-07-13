@@ -15,6 +15,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
 import { useRouter } from "expo-router";
+import { Feather } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import { useAuthStore } from "@/store/authStore";
 import {
@@ -29,17 +30,26 @@ import { uploadMedia, createPost } from "@/hooks/usePosts";
 import { fetchPostsByUser } from "@/services/postRepository";
 import { COLORS, SPACING, FONTS, RADIUS } from "@/constants/theme";
 import { openAthleteProfile } from "@/utils/navigation";
+import { toHandle } from "@/utils/format";
 import BattleCard from "@/components/BattleCard";
+import BattleCardSkeleton from "@/components/BattleCardSkeleton";
 import BattleDetailModal from "@/components/BattleDetailModal";
 import EmptyState from "@/components/EmptyState";
 import LoadingSpinner from "@/components/LoadingSpinner";
 import AvatarImage from "@/components/AvatarImage";
 import GlowButton from "@/components/GlowButton";
 import MediaTile from "@/components/MediaTile";
+import SegmentedTabs from "@/components/SegmentedTabs";
 import type { Battle, Post, BattlePlayer } from "@/types";
 
 // Tabs: "live" = Live Battles, "mine" = My Battles, "completed" = Completed
 type Tab = "live" | "mine" | "completed";
+
+// List rows — "My Battles" injects lightweight group headers between cards
+// (built only from already-loaded battle data; virtualization preserved).
+type ListRow =
+  | { type: "header"; id: string; title: string; subtitle?: string }
+  | { type: "battle"; id: string; battle: Battle };
 
 // ─── Post thumbnail — uses MediaTile for native-safe rendering ───────────────
 function PostThumbItem({
@@ -55,9 +65,16 @@ function PostThumbItem({
 }) {
   return (
     <Pressable
-      style={[modal.postThumb, selected && modal.postThumbSelected]}
+      style={({ pressed }) => [
+        modal.postThumb,
+        selected && modal.postThumbSelected,
+        pressed && { opacity: 0.8 },
+      ]}
       onPress={onPress}
       disabled={disabled}
+      accessibilityRole="button"
+      accessibilityLabel={`Use post: ${post.caption || "untitled post"}`}
+      accessibilityState={{ selected: !!selected, disabled }}
     >
       <View style={modal.thumbWrap}>
         <MediaTile
@@ -68,7 +85,7 @@ function PostThumbItem({
         />
         {selected && (
           <View style={modal.thumbCheck}>
-            <Text style={modal.thumbCheckText}>✓</Text>
+            <Feather name="check" size={13} color={COLORS.background} />
           </View>
         )}
       </View>
@@ -81,10 +98,6 @@ function PostThumbItem({
 // Shows the original challenger, the battle category, the rules, a side-by-side
 // matchup preview, and a post picker. The challenge is only accepted after the
 // user explicitly taps "Confirm & Accept" (no accidental single-tap accepts).
-function toHandle(username: string): string {
-  return "@" + username.toLowerCase().replace(/\s+/g, ".");
-}
-
 function AcceptModal({
   visible,
   battle,
@@ -295,9 +308,12 @@ function AcceptModal({
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={modal.row}>
                 {/* Upload-new tile (always first) */}
                 <Pressable
-                  style={modal.uploadTile}
+                  style={({ pressed }) => [modal.uploadTile, pressed && { opacity: 0.8 }]}
                   onPress={pickAndUpload}
                   disabled={uploading || submitting}
+                  accessibilityRole="button"
+                  accessibilityLabel="Upload new photo or video"
+                  accessibilityState={{ disabled: uploading || submitting, busy: uploading }}
                 >
                   {uploading ? (
                     <>
@@ -306,7 +322,7 @@ function AcceptModal({
                     </>
                   ) : (
                     <>
-                      <Text style={modal.uploadIcon}>＋</Text>
+                      <Feather name="plus" size={24} color={COLORS.accent} />
                       <Text style={modal.uploadLabel}>Upload new</Text>
                     </>
                   )}
@@ -337,7 +353,13 @@ function AcceptModal({
               disabled={!selectedPost || submitting}
               style={modal.confirmBtn}
             />
-            <Pressable onPress={onClose} style={modal.cancelBtn} disabled={submitting}>
+            <Pressable
+              onPress={onClose}
+              disabled={submitting}
+              accessibilityRole="button"
+              accessibilityLabel="Cancel"
+              style={({ pressed }) => [modal.cancelBtn, pressed && { opacity: 0.7 }]}
+            >
               <Text style={modal.cancelText}>Cancel</Text>
             </Pressable>
           </ScrollView>
@@ -463,7 +485,6 @@ const modal = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  thumbCheckText: { color: COLORS.background, fontSize: 12, fontWeight: FONTS.heavy },
   postName: { color: COLORS.textSecondary, fontSize: 11, textAlign: "center" },
 
   // Upload-new tile
@@ -480,7 +501,6 @@ const modal = StyleSheet.create({
     justifyContent: "center",
     gap: SPACING.xs,
   },
-  uploadIcon: { color: COLORS.accent, fontSize: 26, fontWeight: FONTS.light, lineHeight: 28 },
   uploadLabel: { color: COLORS.textSecondary, fontSize: 11, fontWeight: FONTS.semibold },
   emptyHint: {
     color: COLORS.textMuted,
@@ -524,8 +544,11 @@ function BattleRowCard({
       ? (winner as BattlePlayer).username
       : null;
 
+  // WEB DOM NESTING: the outer container is a plain View — the avatar
+  // pressables and the row's own press target must be siblings, never
+  // interactive elements nested inside a role="button" element.
   return (
-    <Pressable onPress={onPress} style={rowCard.wrap}>
+    <View style={rowCard.wrap}>
       {/* Stacked avatars — each tappable for profile navigation */}
       <View style={rowCard.avatarStack}>
         {pA && (
@@ -558,28 +581,38 @@ function BattleRowCard({
         )}
       </View>
 
-      {/* Info */}
-      <View style={rowCard.info}>
-        <Text style={rowCard.title} numberOfLines={1}>{battle.category || "Battle"}</Text>
-        <Text style={rowCard.meta}>
-          {winnerName
-            ? `Winner: ${winnerName} · ${totalVotes.toLocaleString()} votes`
-            : timeLabel
-            ? `${timeLabel} · ${totalVotes.toLocaleString()} votes`
-            : `${totalVotes.toLocaleString()} votes`}
-        </Text>
-      </View>
+      {/* Row body — the actual "open detail" button (info + chevron) */}
+      <Pressable
+        onPress={onPress}
+        accessibilityRole="button"
+        accessibilityLabel={`${battle.category || "Battle"}: ${pA?.username ?? "open"} vs ${
+          pB?.username ?? "open slot"
+        }. ${totalVotes} votes.`}
+        style={({ pressed }) => [rowCard.body, pressed && { opacity: 0.8 }]}
+      >
+        {/* Info */}
+        <View style={rowCard.info}>
+          <Text style={rowCard.title} numberOfLines={1}>{battle.category || "Battle"}</Text>
+          <Text style={rowCard.meta}>
+            {winnerName
+              ? `Winner: ${winnerName} · ${totalVotes.toLocaleString()} votes`
+              : timeLabel
+              ? `${timeLabel} · ${totalVotes.toLocaleString()} votes`
+              : `${totalVotes.toLocaleString()} votes`}
+          </Text>
+        </View>
 
-      {/* Badge + chevron */}
-      <View style={rowCard.right}>
-        <View style={[
-          rowCard.statusDot,
-          status === "live"      && rowCard.liveDot,
-          status === "completed" && rowCard.completedDot,
-        ]} />
-        <Text style={rowCard.chevron}>›</Text>
-      </View>
-    </Pressable>
+        {/* Badge + chevron */}
+        <View style={rowCard.right}>
+          <View style={[
+            rowCard.statusDot,
+            status === "live"      && rowCard.liveDot,
+            status === "completed" && rowCard.completedDot,
+          ]} />
+          <Feather name="chevron-right" size={18} color={COLORS.textMuted} />
+        </View>
+      </Pressable>
+    </View>
   );
 }
 
@@ -594,6 +627,13 @@ const rowCard = StyleSheet.create({
     gap: SPACING.md,
   },
   avatarStack: { flexDirection: "row", width: 52 },
+  body: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: SPACING.md,
+    minHeight: 44, // accessible touch target
+  },
   avatarRing: {
     borderRadius: 22,
     borderWidth: 2,
@@ -618,8 +658,7 @@ const rowCard = StyleSheet.create({
     backgroundColor: COLORS.inputBorder,
   },
   liveDot: { backgroundColor: COLORS.live },
-  completedDot: { backgroundColor: COLORS.accent },
-  chevron: { color: COLORS.textMuted, fontSize: 20, fontWeight: FONTS.light },
+  completedDot: { backgroundColor: COLORS.warning },
 });
 
 // ─── Main Battles Screen ──────────────────────────────────────────────────────
@@ -689,6 +728,58 @@ export default function BattlesScreen() {
   const heroBattle = activeTab === "live" && filtered.length > 0 ? filtered[0] : null;
   const moreBattles = activeTab === "live" && filtered.length > 1 ? filtered.slice(1) : [];
   const showHeroSplit = activeTab === "live" && heroBattle !== null;
+
+  // ── Honest per-tab counts (from the already-loaded page — no new queries) ───
+  const tabCounts = useMemo(() => {
+    let live = 0;
+    let mine = 0;
+    let completed = 0;
+    battles.forEach((b) => {
+      const status = getBattleStatus(b);
+      if (status === "live" || status === "open") live += 1;
+      if (status === "completed") completed += 1;
+      if (
+        b.playerA?.userId === userId ||
+        b.playerB?.userId === userId ||
+        b.creatorId === userId
+      ) {
+        mine += 1;
+      }
+    });
+    return { live, mine, completed };
+  }, [battles, userId]);
+
+  // ── "My Battles" grouping — challenges sent / live / completed ──────────────
+  // Built purely from loaded data. Other tabs pass battles through unchanged.
+  const listRows = useMemo<ListRow[]>(() => {
+    if (showHeroSplit) return [];
+    if (activeTab !== "mine") {
+      return filtered.map((b) => ({ type: "battle", id: b.id, battle: b }));
+    }
+    const waiting: Battle[] = [];
+    const liveNow: Battle[] = [];
+    const done: Battle[] = [];
+    filtered.forEach((b) => {
+      const status = getBattleStatus(b);
+      if (status === "open") waiting.push(b);
+      else if (status === "live") liveNow.push(b);
+      else done.push(b);
+    });
+    const rows: ListRow[] = [];
+    if (liveNow.length > 0) {
+      rows.push({ type: "header", id: "h-live", title: "Live now", subtitle: "The community is voting" });
+      liveNow.forEach((b) => rows.push({ type: "battle", id: b.id, battle: b }));
+    }
+    if (waiting.length > 0) {
+      rows.push({ type: "header", id: "h-open", title: "Challenges sent", subtitle: "Waiting for an opponent" });
+      waiting.forEach((b) => rows.push({ type: "battle", id: b.id, battle: b }));
+    }
+    if (done.length > 0) {
+      rows.push({ type: "header", id: "h-done", title: "Completed" });
+      done.forEach((b) => rows.push({ type: "battle", id: b.id, battle: b }));
+    }
+    return rows;
+  }, [activeTab, filtered, showHeroSplit]);
 
   function openDetail(battle: Battle) {
     setDetailBattle(battle);
@@ -807,8 +898,30 @@ export default function BattlesScreen() {
     [userId]
   );
 
-  if (loading) return <LoadingSpinner fullscreen label="Loading battles…" />;
-  if (error) {
+  const tabDefs: { key: Tab; label: string }[] = [
+    { key: "live",      label: `Live${tabCounts.live > 0 ? ` (${tabCounts.live})` : ""}` },
+    { key: "mine",      label: `My Battles${tabCounts.mine > 0 ? ` (${tabCounts.mine})` : ""}` },
+    { key: "completed", label: `Completed${tabCounts.completed > 0 ? ` (${tabCounts.completed})` : ""}` },
+  ];
+
+  // Initial load with nothing cached — skeletons matching the card layout.
+  if (loading && battles.length === 0) {
+    return (
+      <SafeAreaView style={styles.safe} edges={["top"]}>
+        <View style={styles.header}>
+          <Text style={styles.heading}>Battles</Text>
+        </View>
+        <View style={styles.tabBarWrap}>
+          <SegmentedTabs tabs={tabDefs} activeKey={activeTab} onChange={setActiveTab} />
+        </View>
+        <BattleCardSkeleton count={2} />
+      </SafeAreaView>
+    );
+  }
+
+  // Hard error only when there is nothing at all to show. If a previous page
+  // loaded, keep it on screen and surface the error as a banner instead.
+  if (error && battles.length === 0) {
     return (
       <SafeAreaView style={styles.safe} edges={["top"]}>
         <EmptyState icon="⚠️" title="Failed to load battles" subtitle={error}
@@ -816,12 +929,6 @@ export default function BattlesScreen() {
       </SafeAreaView>
     );
   }
-
-  const tabDefs: { key: Tab; label: string }[] = [
-    { key: "live",      label: "Live Battles" },
-    { key: "mine",      label: "My Battles" },
-    { key: "completed", label: "Completed" },
-  ];
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -831,127 +938,214 @@ export default function BattlesScreen() {
       </View>
 
       {/* ── Tabs ───────────────────────────────────────────────────────────── */}
-      <View style={styles.tabBar}>
-        {tabDefs.map((t) => (
-          <Pressable key={t.key} style={styles.tab} onPress={() => setActiveTab(t.key)}>
-            <Text style={[styles.tabText, activeTab === t.key && styles.tabTextActive]}>
-              {t.label}
-            </Text>
-            <View style={[styles.tabUnderline, activeTab === t.key && styles.tabUnderlineActive]} />
-          </Pressable>
-        ))}
+      <View style={styles.tabBarWrap}>
+        <SegmentedTabs tabs={tabDefs} activeKey={activeTab} onChange={setActiveTab} />
       </View>
 
       {/* ── Stats-sync warning (non-blocking) ──────────────────────────────── */}
       {finalizeWarning && (
-        <View style={styles.warningBanner}>
-          <Text style={styles.warningIcon}>⚠️</Text>
+        <View style={styles.warningBanner} accessibilityRole="alert">
+          <Feather name="alert-triangle" size={14} color={COLORS.warning} />
           <Text style={styles.warningText}>{finalizeWarning}</Text>
         </View>
       )}
 
+      {/* ── Refresh error banner — cached battles stay on screen ───────────── */}
+      {error && battles.length > 0 && (
+        <View style={styles.warningBanner} accessibilityRole="alert">
+          <Feather name="alert-triangle" size={14} color={COLORS.warning} />
+          <Text style={styles.warningText}>
+            Couldn’t refresh battles. Showing the last loaded results.
+          </Text>
+          <Pressable
+            onPress={manualRefresh}
+            accessibilityRole="button"
+            accessibilityLabel="Retry loading battles"
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Text style={styles.retryText}>Retry</Text>
+          </Pressable>
+        </View>
+      )}
+
       {/* ── Content ────────────────────────────────────────────────────────── */}
-      <ScrollView
+      {/* PERF: FlatList instead of ScrollView+map so the My Battles / Completed
+          card lists are virtualized — previously every BattleCard (media tiles,
+          thumbnails, avatars) mounted at once. UI is unchanged: the live tab's
+          hero + "More Battles" rounded section renders as the list header
+          (lightweight rows), while the full-size card lists go through
+          renderItem and mount lazily. */}
+      <FlatList<ListRow>
+        data={listRows}
+        keyExtractor={(item) => item.id}
         showsVerticalScrollIndicator={false}
+        initialNumToRender={3}
+        maxToRenderPerBatch={3}
+        windowSize={7}
+        // NOTE: removeClippedSubviews is intentionally NOT set here. The live
+        // tab's ListHeaderComponent contains an auto-playing <Video> and
+        // absolutely-positioned overlays (voted check / winner badge), and RN's
+        // subview clipping is known to blank native video views and drop
+        // absolute-positioned children when they detach mid-scroll. The
+        // virtualization win comes from the window props above.
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={manualRefresh} tintColor={COLORS.accent} />
         }
-        contentContainerStyle={filtered.length === 0 ? { flex: 1 } : { paddingBottom: SPACING.xxxl }}
-      >
-        {filtered.length === 0 ? (
-          <EmptyState
-            icon={activeTab === "live" ? "🔴" : activeTab === "mine" ? "👤" : "✅"}
-            title={
-              activeTab === "live" ? "No live battles yet." :
-              activeTab === "mine" ? "Your battles will show here." :
-              "No completed battles yet."
-            }
-            subtitle={
-              activeTab === "live" ? "Start one from any post." :
-              activeTab === "mine" ? "Open or accept a challenge to compete." :
-              "Check back after battles end."
-            }
-            actionLabel={activeTab !== "completed" ? "Start your first battle" : undefined}
-            onAction={activeTab !== "completed" ? () => router.push("/create" as never) : undefined}
-          />
-        ) : showHeroSplit ? (
-          <>
-            {/* Hero battle card — tapping opens detail */}
-            <View style={styles.heroSection}>
-              <Pressable onPress={() => openDetail(heroBattle!)} style={{ flex: 1 }}>
+        contentContainerStyle={
+          filtered.length === 0 ? { flex: 1 } : { paddingBottom: SPACING.xxxl }
+        }
+        renderItem={({ item, index }) => {
+          /* Group header row (My Battles) */
+          if (item.type === "header") {
+            return (
+              <View style={styles.groupHeader} accessibilityRole="header">
+                <Text style={styles.groupHeaderTitle}>{item.title}</Text>
+                {item.subtitle ? (
+                  <Text style={styles.groupHeaderSub}>{item.subtitle}</Text>
+                ) : null}
+              </View>
+            );
+          }
+          /* My Battles / Completed: regular card list — each tappable for detail.
+             WEB DOM NESTING: the card wrapper must NOT carry role="button" —
+             react-native-web renders that role as a real <button>, and
+             BattleCard contains its own <button>s (share, vote, accept),
+             which triggers validateDOMNesting. The wrapper stays a plain
+             pressable <div> for mouse/touch, `accessible={false}` keeps the
+             children individually readable, and the labelled "View Battle"
+             button below is the keyboard/screen-reader path. */
+          const b = item.battle;
+          return (
+            <View>
+              <Pressable onPress={() => openDetail(b)} accessible={false}>
                 <BattleCard
-                  battle={heroBattle!}
-                  userVote={votedMap.get(heroBattle!.id) ?? null}
+                  battle={b}
+                  userVote={votedMap.get(b.id) ?? null}
                   onVote={handleVoteWithAdvance}
                   onAccept={openAccept}
                   currentUserId={userId}
-                  featured
-                  autoPlayMedia
+                  featured={index === 0}
                 />
               </Pressable>
-              {/* Quick actions below hero */}
-              <View style={styles.heroActions}>
-                <Pressable
-                  style={[styles.viewBattleBtn, styles.heroActionBtn]}
-                  onPress={() => openDetail(heroBattle!)}
-                >
-                  <Text style={styles.viewBattleBtnText}>View Battle →</Text>
-                </Pressable>
-                {(canVoteOnBattle(heroBattle!) || canSkipBattle(heroBattle!)) && (
-                  <Pressable
-                    style={[styles.viewBattleBtn, styles.heroActionBtn, styles.skipBattleBtn]}
-                    onPress={() => handleSkipBattle(heroBattle!.id)}
-                  >
-                    <Text style={styles.viewBattleBtnText}>Skip →</Text>
-                  </Pressable>
-                )}
-              </View>
+              <Pressable
+                style={({ pressed }) => [styles.viewBattleBtn, pressed && { opacity: 0.75 }]}
+                onPress={() => openDetail(b)}
+                accessibilityRole="button"
+                accessibilityLabel={`View battle between ${b.playerA?.username ?? "an athlete"} and ${
+                  b.playerB?.username ?? "an open slot"
+                }`}
+              >
+                <Text style={styles.viewBattleBtnText}>View Battle →</Text>
+              </Pressable>
             </View>
-
-            {/* "More Battles" section — each row opens detail */}
-            {moreBattles.length > 0 && (
-              <View style={styles.moreBattlesSection}>
-                <View style={styles.moreBattlesHeader}>
-                  <Text style={styles.moreBattlesTitle}>More Battles</Text>
-                  <Text style={styles.moreBattlesCount}>{moreBattles.length} more</Text>
-                </View>
-                {moreBattles.map((b) => (
-                  <BattleRowCard
-                    key={b.id}
-                    battle={b}
-                    onPress={() => openDetail(b)}
-                    currentUserId={userId}
-                  />
-                ))}
-              </View>
-            )}
-          </>
-        ) : (
-          /* My Battles / Completed: regular card list — each tappable for detail */
-          <View style={{ paddingTop: SPACING.md }}>
-            {filtered.map((b, index) => (
-              <View key={b.id}>
-                <Pressable onPress={() => openDetail(b)}>
+          );
+        }}
+        ListHeaderComponent={
+          showHeroSplit ? (
+            <>
+              {/* Hero battle card — tapping opens detail */}
+              <View style={styles.heroSection}>
+                {/* Roleless pressable wrapper — renders a <div> on web so the
+                    buttons inside BattleCard stay valid. */}
+                <Pressable
+                  onPress={() => openDetail(heroBattle!)}
+                  style={{ flex: 1 }}
+                  accessible={false}
+                >
                   <BattleCard
-                    battle={b}
-                    userVote={votedMap.get(b.id) ?? null}
+                    battle={heroBattle!}
+                    userVote={votedMap.get(heroBattle!.id) ?? null}
                     onVote={handleVoteWithAdvance}
                     onAccept={openAccept}
                     currentUserId={userId}
-                    featured={index === 0}
+                    featured
+                    autoPlayMedia
                   />
                 </Pressable>
-                <Pressable
-                  style={styles.viewBattleBtn}
-                  onPress={() => openDetail(b)}
-                >
-                  <Text style={styles.viewBattleBtnText}>View Battle →</Text>
-                </Pressable>
+                {/* Quick actions below hero */}
+                <View style={styles.heroActions}>
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.viewBattleBtn,
+                      styles.heroActionBtn,
+                      pressed && { opacity: 0.75 },
+                    ]}
+                    onPress={() => openDetail(heroBattle!)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`View battle between ${heroBattle!.playerA?.username ?? "an athlete"} and ${
+                      heroBattle!.playerB?.username ?? "an open slot"
+                    }`}
+                  >
+                    <Text style={styles.viewBattleBtnText}>View Battle →</Text>
+                  </Pressable>
+                  {(canVoteOnBattle(heroBattle!) || canSkipBattle(heroBattle!)) && (
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.viewBattleBtn,
+                        styles.heroActionBtn,
+                        styles.skipBattleBtn,
+                        pressed && { opacity: 0.75 },
+                      ]}
+                      onPress={() => handleSkipBattle(heroBattle!.id)}
+                      accessibilityRole="button"
+                      accessibilityLabel="Skip to next battle"
+                    >
+                      <Text style={styles.viewBattleBtnText}>Skip →</Text>
+                    </Pressable>
+                  )}
+                </View>
               </View>
-            ))}
-          </View>
-        )}
-      </ScrollView>
+
+              {/* "More Battles" section — each row opens detail */}
+              {moreBattles.length > 0 && (
+                <View style={styles.moreBattlesSection}>
+                  <View style={styles.moreBattlesHeader}>
+                    <Text style={styles.moreBattlesTitle}>More Battles</Text>
+                    <Text style={styles.moreBattlesCount}>{moreBattles.length} more</Text>
+                  </View>
+                  {moreBattles.map((b) => (
+                    <BattleRowCard
+                      key={b.id}
+                      battle={b}
+                      onPress={() => openDetail(b)}
+                      currentUserId={userId}
+                    />
+                  ))}
+                </View>
+              )}
+            </>
+          ) : filtered.length > 0 ? (
+            <View style={{ height: SPACING.md }} />
+          ) : null
+        }
+        ListEmptyComponent={
+          filtered.length === 0 ? (
+            activeTab === "live" ? (
+              <EmptyState
+                icon="⚔️"
+                title="No live battles right now"
+                subtitle="Challenge an athlete from any highlight and be the first matchup."
+                actionLabel="Find a highlight to challenge"
+                onAction={() => router.push("/(tabs)" as never)}
+              />
+            ) : activeTab === "mine" ? (
+              <EmptyState
+                icon="🥊"
+                title="You haven't battled yet"
+                subtitle="Open a challenge from one of your posts, or accept one from the Live tab."
+                actionLabel="See live battles"
+                onAction={() => setActiveTab("live")}
+              />
+            ) : (
+              <EmptyState
+                icon="🏆"
+                title="Your completed battles will appear here"
+                subtitle="When a battle's timer ends, the winner lands on this tab."
+              />
+            )
+          ) : null
+        }
+      />
 
       {/* ── Accept modal ───────────────────────────────────────────────────── */}
       <AcceptModal
@@ -1009,52 +1203,44 @@ const styles = StyleSheet.create({
     marginTop: SPACING.sm,
     paddingVertical: SPACING.sm,
     paddingHorizontal: SPACING.md,
-    backgroundColor: "rgba(255,196,0,0.10)",
+    backgroundColor: COLORS.warningFaint,
     borderWidth: 1,
-    borderColor: "rgba(255,196,0,0.45)",
+    borderColor: COLORS.warningBorder,
     borderRadius: RADIUS.md,
   },
-  warningIcon: { fontSize: 14 },
   warningText: {
     flex: 1,
     color: COLORS.textSecondary,
     fontSize: 12,
     lineHeight: 17,
   },
-
-  // Tabs
-  tabBar: {
-    flexDirection: "row",
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.cardBorder,
-    paddingHorizontal: SPACING.lg,
-  },
-  tab: {
-    flex: 1,
-    paddingHorizontal: SPACING.sm,
-    alignItems: "center",
-    paddingTop: SPACING.sm,
-    paddingBottom: 0,
-  },
-  tabText: {
-    color: COLORS.textMuted,
-    fontSize: 14,
-    fontWeight: FONTS.semibold,
-    letterSpacing: 0.2,
-  },
-  tabTextActive: {
-    color: COLORS.textPrimary,
+  retryText: {
+    color: COLORS.accent,
+    fontSize: 12,
     fontWeight: FONTS.bold,
   },
-  tabUnderline: {
-    width: "100%",
-    height: 3,
-    borderRadius: 3,
-    backgroundColor: COLORS.transparent,
-    marginTop: SPACING.sm + 2,
+
+  // "My Battles" group headers
+  groupHeader: {
+    paddingHorizontal: SPACING.lg,
+    paddingTop: SPACING.lg,
+    paddingBottom: SPACING.sm,
   },
-  tabUnderlineActive: {
-    backgroundColor: COLORS.accent,
+  groupHeaderTitle: {
+    color: COLORS.textPrimary,
+    fontSize: 15,
+    fontWeight: FONTS.heavy,
+    letterSpacing: 0.3,
+  },
+  groupHeaderSub: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    marginTop: 1,
+  },
+
+  // Tabs
+  tabBarWrap: {
+    paddingHorizontal: SPACING.lg,
   },
 
   // Hero section

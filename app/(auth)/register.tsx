@@ -17,6 +17,7 @@ import { ensureUserProfile, isUsernameTaken } from "@/hooks/useProfile";
 import { useAuthStore } from "@/store/authStore";
 import { COLORS, SPACING, RADIUS, FONTS, ATHLETE_TYPES } from "@/constants/theme";
 import GlowButton from "@/components/GlowButton";
+import Chip from "@/components/Chip";
 
 function authErrorMessage(code: string): string {
   switch (code) {
@@ -119,10 +120,15 @@ export default function RegisterScreen() {
           keyboardShouldPersistTaps="handled"
         >
           {/* Back button */}
-          <Pressable onPress={() => {
-            if (step === "profile") setStep("credentials");
-            else router.back();
-          }} style={styles.backBtn}>
+          <Pressable
+            onPress={() => {
+              if (step === "profile") setStep("credentials");
+              else router.back();
+            }}
+            accessibilityRole="button"
+            accessibilityLabel="Go back"
+            style={({ pressed }) => [styles.backBtn, pressed && { opacity: 0.7 }]}
+          >
             <Text style={styles.backText}>← Back</Text>
           </Pressable>
 
@@ -169,7 +175,11 @@ export default function RegisterScreen() {
                 editable={!loading}
               />
 
-              {error ? <Text style={styles.error}>{error}</Text> : null}
+              {error ? (
+                <Text style={styles.error} accessibilityRole="alert">
+                  {error}
+                </Text>
+              ) : null}
 
               <GlowButton
                 label="Continue"
@@ -195,23 +205,13 @@ export default function RegisterScreen() {
               <Text style={styles.sectionLabel}>Sport</Text>
               <View style={styles.chipGrid}>
                 {ATHLETE_TYPES.map((type) => (
-                  <Pressable
+                  <Chip
                     key={type}
-                    style={[
-                      styles.chip,
-                      athleteType === type && styles.chipActive,
-                    ]}
+                    label={type}
+                    selected={athleteType === type}
                     onPress={() => setAthleteType(type)}
-                  >
-                    <Text
-                      style={[
-                        styles.chipText,
-                        athleteType === type && styles.chipTextActive,
-                      ]}
-                    >
-                      {type}
-                    </Text>
-                  </Pressable>
+                    disabled={loading}
+                  />
                 ))}
               </View>
 
@@ -226,7 +226,11 @@ export default function RegisterScreen() {
                 editable={!loading}
               />
 
-              {error ? <Text style={styles.error}>{error}</Text> : null}
+              {error ? (
+                <Text style={styles.error} accessibilityRole="alert">
+                  {error}
+                </Text>
+              ) : null}
 
               <View style={styles.buttonRow}>
                 <GlowButton
@@ -250,7 +254,12 @@ export default function RegisterScreen() {
           )}
 
           {step === "credentials" && (
-            <Pressable onPress={() => router.back()} style={styles.switchRow}>
+            <Pressable
+              onPress={() => router.back()}
+              accessibilityRole="link"
+              accessibilityLabel="Sign in to an existing account"
+              style={({ pressed }) => [styles.switchRow, pressed && { opacity: 0.7 }]}
+            >
               <Text style={styles.switchText}>
                 Have an account?{" "}
                 <Text style={styles.switchLink}>Sign in →</Text>
@@ -312,27 +321,6 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     flexWrap: "wrap",
     gap: SPACING.sm,
-  },
-  chip: {
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    borderRadius: RADIUS.full,
-    borderWidth: 1,
-    borderColor: COLORS.inputBorder,
-    backgroundColor: COLORS.surface,
-  },
-  chipActive: {
-    backgroundColor: COLORS.accentFaint,
-    borderColor: COLORS.accent,
-  },
-  chipText: {
-    color: COLORS.textSecondary,
-    fontSize: 13,
-    fontWeight: FONTS.medium,
-  },
-  chipTextActive: {
-    color: COLORS.accent,
-    fontWeight: FONTS.bold,
   },
   buttonRow: {
     flexDirection: "row",

@@ -83,14 +83,17 @@ export function normalizePost(
     stringValue(data.mediaURL) ||
     stringValue(data.photoURL);
   const userAvatar =
-    stringValue(data.userAvatar) ||
     stringValue(data.avatarUrl) ||
+    stringValue(data.authorAvatar) ||
+    stringValue(data.userAvatar) ||
     stringValue(data.avatar) ||
     stringValue(data.photoURL);
   const avatarUrl =
     stringValue(data.avatarUrl) ||
+    stringValue(data.authorAvatar) ||
     stringValue(data.userAvatar) ||
-    stringValue(data.avatar);
+    stringValue(data.avatar) ||
+    stringValue(data.photoURL);
   const isVideo =
     data.mediaType === "video" ||
     /\.(mp4|mov|m4v|avi|webm|mkv)(\?|#|$)/i.test(mediaUrl);
@@ -110,7 +113,38 @@ export function normalizePost(
     originalMediaUrl: stringValue(data.originalMediaUrl) || undefined,
     videoEdit: normalizeVideoEdit(data.videoEdit),
     createdAt: (data.createdAt as Timestamp) ?? null,
+    // ── Optional athlete identity / status fields (tolerant of alias names) ──
+    sport:
+      stringValue(data.sport) || stringValue(data.athleteType) || undefined,
+    position:
+      stringValue(data.position) ||
+      stringValue(data.playerPosition) ||
+      undefined,
+    school:
+      stringValue(data.school) || stringValue(data.schoolName) || undefined,
+    teamName:
+      stringValue(data.teamName) || stringValue(data.team) || undefined,
+    city: stringValue(data.city) || undefined,
+    state:
+      stringValue(data.state) || stringValue(data.region) || undefined,
+    gradYear: normalizeGradYear(
+      data.gradYear ?? data.graduationYear ?? data.classOf
+    ),
+    verified: data.verified === true || data.isVerified === true || undefined,
+    momentumScore:
+      typeof data.momentumScore === "number" ? data.momentumScore : undefined,
+    isLive: data.isLive === true || undefined,
+    battleWon: data.battleWon === true || undefined,
+    pinned: data.pinned === true || data.isPinned === true || undefined,
+    commentsCount:
+      typeof data.commentsCount === "number" ? data.commentsCount : undefined,
   };
+}
+
+function normalizeGradYear(value: unknown): string | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "string" && value.trim()) return value.trim();
+  return undefined;
 }
 
 function deduplicateAndSort(posts: Post[]): Post[] {

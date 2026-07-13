@@ -24,12 +24,12 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   View,
   Image,
-  Text,
   StyleSheet,
   StyleProp,
   ViewStyle,
   Platform,
 } from "react-native";
+import { Feather } from "@expo/vector-icons";
 import { COLORS } from "@/constants/theme";
 import {
   getVideoThumbnailUri,
@@ -134,7 +134,11 @@ export default function MediaTile({
   }, [isWeb, isVideo, isUrlValid, normalizedUri]);
 
   // ── Native prefetch diagnostic (DEV only, images only) ───────────────────────
+  // PERF: this was documented as a DEV diagnostic but ran unconditionally,
+  // issuing a duplicate native image download alongside <Image>'s own load for
+  // every image tile in production. Now actually gated to DEV.
   useEffect(() => {
+    if (!__DEV__) return;
     // Only prefetch for valid image URLs — never for videos or invalid URLs.
     // Prefetching .mp4 URLs causes "Error decoding image data" on iOS.
     if (!normalizedUri || isVideo || !isUrlValid) return;
@@ -182,7 +186,7 @@ export default function MediaTile({
             />
           ) : null}
           <View style={styles.playCircle}>
-            <Text style={styles.playIcon}>▶</Text>
+            <Feather name="play" size={18} color={COLORS.accent} style={styles.playIcon} />
           </View>
         </View>
       ) : renderBranch === "placeholder" ? (
@@ -191,7 +195,7 @@ export default function MediaTile({
         // Shows a dark placeholder instead of attempting to render a bad URL
         // (which would log "Error decoding image data" and show nothing anyway).
         <View style={styles.fill}>
-          <Text style={styles.fallbackIcon}>🖼️</Text>
+          <Feather name="image" size={28} color={COLORS.textMuted} style={styles.fallbackIcon} />
         </View>
       ) : (
         // ── Image: absoluteFillObject eliminates % dimension resolution race ───
@@ -232,12 +236,9 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   playIcon: {
-    color: COLORS.accent,
-    fontSize: 18,
-    marginLeft: 3, // visual centering of ▶ glyph
+    marginLeft: 2, // visual centering of play glyph
   },
   fallbackIcon: {
-    fontSize: 28,
     opacity: 0.35,
   },
 });

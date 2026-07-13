@@ -19,9 +19,10 @@ import {
   ActivityIndicator,
   Alert,
 } from "react-native";
+import { Feather } from "@expo/vector-icons";
 import { createLiveBattle } from "@/hooks/useBattles";
 import { fetchPostsByUser } from "@/services/postRepository";
-import { COLORS, SPACING, RADIUS, FONTS } from "@/constants/theme";
+import { COLORS, SPACING, RADIUS, FONTS, TYPE } from "@/constants/theme";
 import AvatarImage from "./AvatarImage";
 import MediaTile from "./MediaTile";
 import type { Post, BattlePlayer, UserProfile } from "@/types";
@@ -58,7 +59,14 @@ function PostPickItem({
       key={p.id}
       onPress={onPress}
       disabled={creating}
-      style={[styles.thumbWrap, isSelected && styles.thumbWrapSelected]}
+      accessibilityRole="button"
+      accessibilityLabel={`Battle with post: ${p.caption || "untitled post"}`}
+      accessibilityState={{ selected: isSelected, disabled: creating }}
+      style={({ pressed }) => [
+        styles.thumbWrap,
+        isSelected && styles.thumbWrapSelected,
+        pressed && { opacity: 0.8 },
+      ]}
     >
       {/* Explicit THUMB_W × THUMB_H so MediaTile's absoluteFillObject image
           resolves pixel dimensions without any percentage ambiguity on iOS. */}
@@ -247,7 +255,7 @@ export default function BattlePickerModal({
           ) : myPosts.length === 0 ? (
             /* ── No posts guard ── */
             <View style={styles.center}>
-              <Text style={styles.noPostsIcon}>📷</Text>
+              <Feather name="camera" size={32} color={COLORS.textMuted} />
               <Text style={styles.noPostsTitle}>No posts yet</Text>
               <Text style={styles.noPostsSub}>
                 Create a post first before challenging.
@@ -272,7 +280,13 @@ export default function BattlePickerModal({
           )}
 
           {/* Cancel */}
-          <Pressable onPress={onClose} style={styles.cancelBtn} disabled={creating}>
+          <Pressable
+            onPress={onClose}
+            disabled={creating}
+            accessibilityRole="button"
+            accessibilityLabel="Cancel"
+            style={({ pressed }) => [styles.cancelBtn, pressed && { opacity: 0.7 }]}
+          >
             <Text style={styles.cancelText}>Cancel</Text>
           </Pressable>
         </View>
@@ -288,7 +302,7 @@ const styles = StyleSheet.create({
   },
   backdrop: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0,0,0,0.6)",
+    backgroundColor: COLORS.scrim,
   },
   sheet: {
     backgroundColor: COLORS.card,
@@ -384,7 +398,6 @@ const styles = StyleSheet.create({
     paddingVertical: SPACING.xl,
     gap: SPACING.sm,
   },
-  noPostsIcon: { fontSize: 36 },
   noPostsTitle: {
     color: COLORS.textPrimary,
     fontSize: 16,

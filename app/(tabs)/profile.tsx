@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   View,
   Text,
-  FlatList,
   StyleSheet,
   Image,
   Pressable,
@@ -10,16 +9,18 @@ import {
   TextInput,
   Modal,
   Alert,
-  Dimensions,
   Platform,
+  Share,
 } from "react-native";
-
-const SCREEN_W = Dimensions.get("window").width;
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
 import { useRouter } from "expo-router";
-import { openAthleteProfile } from "@/utils/navigation";
+import { Feather } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
+import Animated, {
+  useSharedValue,
+  useAnimatedScrollHandler,
+} from "react-native-reanimated";
 import { signOut } from "firebase/auth";
 import { serverTimestamp } from "firebase/firestore";
 import { auth } from "@/config/firebase";
@@ -27,16 +28,39 @@ import { useAuthStore } from "@/store/authStore";
 import { updateUserProfile, fetchUserProfile, uploadUserAvatar } from "@/hooks/useProfile";
 import { createBattle, useBattles } from "@/hooks/useBattles";
 import { useUserPosts } from "@/hooks/usePosts";
-import { COLORS, SPACING, RADIUS, FONTS, ATHLETE_TYPES } from "@/constants/theme";
+import {
+  COLORS,
+  SPACING,
+  RADIUS,
+  FONTS,
+  ATHLETE_TYPES,
+  TRENDING_LIKES_THRESHOLD,
+} from "@/constants/theme";
+import { toHandle } from "@/utils/format";
+import { isVideoMedia } from "@/utils/media";
 import AvatarImage from "@/components/AvatarImage";
 import GlowButton from "@/components/GlowButton";
 import EmptyState from "@/components/EmptyState";
 import LoadingSpinner from "@/components/LoadingSpinner";
-import MediaTile from "@/components/MediaTile";
-import PostCard from "@/components/PostCard";
+import IconButton from "@/components/IconButton";
+import ProfileHeader from "@/components/ProfileHeader";
+import ProfileTabs, { ProfileTabDef } from "@/components/ProfileTabs";
+import ProfileCompactBar, { COMPACT_BAR_HEIGHT } from "@/components/ProfileCompactBar";
+import ProfileGridSkeleton from "@/components/ProfileGridSkeleton";
+import PostGridThumb from "@/components/PostGridThumb";
+import BattleHistoryCard from "@/components/BattleHistoryCard";
+import PostDetailModal from "@/components/PostDetailModal";
+import Chip from "@/components/Chip";
 import type { Battle, Post, UserProfile } from "@/types";
 
-type ProfileTab = "posts" | "battles" | "saved";
+type ProfileTab = "posts" | "highlights" | "battles" | "saved";
+
+const PROFILE_TABS: readonly ProfileTabDef<ProfileTab>[] = [
+  { key: "posts", label: "Posts", icon: "grid" },
+  { key: "highlights", label: "Highlights", icon: "play" },
+  { key: "battles", label: "Battles", icon: "zap" },
+  { key: "saved", label: "Saved", icon: "bookmark" },
+];
 
 // ─── Edit Profile Modal ───────────────────────────────────────────────────────
 function EditProfileModal({
@@ -75,12 +99,16 @@ function EditProfileModal({
         aspect: [1, 1],
         quality: 0.7,
       });
-      if (!result.canceled && result.assets.length > 0) {
-        const asset = result.assets[0];
-        setAvatarUri(asset.uri);
+      if (result.canceled) return;
+      const uri = result.assets?.[0]?.uri?.trim();
+      if (!uri) {
+        console.error("[EditProfileModal] Image picker returned no usable URI", result);
+        Alert.alert("Image unavailable", "That image could not be selected. Please try another.");
+        return;
       }
+      setAvatarUri(uri);
     } catch (err) {
-      console.error("Profile avatar picker failed", err);
+      console.error("[EditProfileModal] Profile image picker failed", err);
       Alert.alert("Avatar failed", "Could not select that image. Try again.");
     }
   }
@@ -90,7 +118,18 @@ function EditProfileModal({
       Alert.alert("Invalid username", "Username must be at least 3 characters.");
       return;
     }
+    const authenticatedUserId = auth.currentUser?.uid;
+    if (!userId || !authenticatedUserId || authenticatedUserId !== userId) {
+      console.error("[EditProfileModal] Profile save rejected: missing or mismatched user", {
+        profileUserId: userId || null,
+        authenticatedUserId: authenticatedUserId || null,
+      });
+      Alert.alert("Sign in required", "Please sign in again before saving your profile.");
+      return;
+    }
+
     setSaving(true);
+    let imageUploadFailed = false;
     try {
       const editAvatar = avatarUri;
       const didAvatarChange = Boolean(
@@ -99,7 +138,16 @@ function EditProfileModal({
 
       let avatarUrl = current.avatarUrl || current.avatar;
       if (didAvatarChange && editAvatar) {
-        avatarUrl = await uploadUserAvatar(editAvatar, userId);
+        try {
+          avatarUrl = await uploadUserAvatar(editAvatar, authenticatedUserId);
+        } catch (uploadError) {
+          imageUploadFailed = true;
+          console.error("[EditProfileModal] Continuing profile save after image upload failure", {
+            userId: authenticatedUserId,
+            uriScheme: editAvatar.split(":")[0] || "unknown",
+            error: uploadError,
+          });
+        }
       }
 
       const payload: Parameters<typeof updateUserProfile>[1] = {
@@ -111,8 +159,8 @@ function EditProfileModal({
         updatedAt: serverTimestamp(),
       };
 
-      await updateUserProfile(userId, payload);
-      const profileAfterRead = await fetchUserProfile(userId);
+      await updateUserProfile(authenticatedUserId, payload);
+      const profileAfterRead = await fetchUserProfile(authenticatedUserId);
 
       const updatedProfile: UserProfile = {
         ...current,
@@ -127,10 +175,18 @@ function EditProfileModal({
 
       onSaved(profileAfterRead ?? updatedProfile);
       onClose();
+      if (imageUploadFailed) {
+        Alert.alert(
+          "Profile saved",
+          "Your profile details were saved, but the profile image could not be uploaded. Please try the image again."
+        );
+      }
     } catch (err) {
-      console.error("Profile save failed", err);
-      const message = err instanceof Error ? err.message : "Could not update your profile. Try again.";
-      Alert.alert("Save failed", message);
+      console.error("[EditProfileModal] Profile document update failed", {
+        userId: authenticatedUserId,
+        error: err,
+      });
+      Alert.alert("Save failed", "Could not update your profile. Please try again.");
     } finally {
       setSaving(false);
     }
@@ -144,14 +200,19 @@ function EditProfileModal({
           <Text style={editStyles.title}>Edit Profile</Text>
 
           {/* Avatar */}
-          <Pressable onPress={pickAvatar} style={editStyles.avatarWrap}>
+          <Pressable
+            onPress={pickAvatar}
+            accessibilityRole="button"
+            accessibilityLabel="Change profile photo"
+            style={({ pressed }) => [editStyles.avatarWrap, pressed && { opacity: 0.8 }]}
+          >
             {avatarUri ? (
               <Image source={{ uri: avatarUri }} style={editStyles.avatar} />
             ) : (
               <AvatarImage uri={current.avatar} username={current.username} size={72} />
             )}
             <View style={editStyles.avatarEditBadge}>
-              <Text style={editStyles.avatarEditText}>✏️</Text>
+              <Feather name="edit-2" size={11} color={COLORS.textSecondary} />
             </View>
           </Pressable>
 
@@ -183,15 +244,13 @@ function EditProfileModal({
             <Text style={editStyles.label}>Sport</Text>
             <View style={editStyles.chipGrid}>
               {ATHLETE_TYPES.map((t) => (
-                <Pressable
+                <Chip
                   key={t}
-                  style={[editStyles.chip, athleteType === t && editStyles.chipActive]}
+                  label={t}
+                  selected={athleteType === t}
                   onPress={() => setAthleteType(t)}
-                >
-                  <Text style={[editStyles.chipText, athleteType === t && editStyles.chipTextActive]}>
-                    {t}
-                  </Text>
-                </Pressable>
+                  disabled={saving}
+                />
               ))}
             </View>
           </ScrollView>
@@ -203,7 +262,12 @@ function EditProfileModal({
             size="lg"
             style={{ marginTop: SPACING.lg }}
           />
-          <Pressable onPress={onClose} style={editStyles.cancelBtn}>
+          <Pressable
+            onPress={onClose}
+            accessibilityRole="button"
+            accessibilityLabel="Cancel editing"
+            style={({ pressed }) => [editStyles.cancelBtn, pressed && { opacity: 0.7 }]}
+          >
             <Text style={editStyles.cancelText}>Cancel</Text>
           </Pressable>
         </View>
@@ -259,7 +323,6 @@ const editStyles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.cardBorder,
   },
-  avatarEditText: { fontSize: 12 },
   label: {
     color: COLORS.textSecondary,
     fontSize: 12,
@@ -286,20 +349,6 @@ const editStyles = StyleSheet.create({
     gap: SPACING.sm,
     marginBottom: SPACING.sm,
   },
-  chip: {
-    paddingHorizontal: SPACING.md,
-    paddingVertical: 6,
-    borderRadius: RADIUS.full,
-    borderWidth: 1,
-    borderColor: COLORS.inputBorder,
-    backgroundColor: COLORS.background,
-  },
-  chipActive: {
-    backgroundColor: COLORS.accentFaint,
-    borderColor: COLORS.accent,
-  },
-  chipText: { color: COLORS.textMuted, fontSize: 12, fontWeight: FONTS.medium },
-  chipTextActive: { color: COLORS.accent, fontWeight: FONTS.bold },
   cancelBtn: {
     paddingVertical: SPACING.md,
     alignItems: "center",
@@ -308,168 +357,32 @@ const editStyles = StyleSheet.create({
   cancelText: { color: COLORS.textMuted, fontSize: 14 },
 });
 
-// ─── Post Thumbnail — uses MediaTile for native-safe rendering ───────────────
-function PostThumb({ post, onPress }: { post: Post; onPress: () => void }) {
-  const SIZE = (SCREEN_W - SPACING.lg * 2 - SPACING.sm * 2) / 3;
-  const thumbStyle = { width: SIZE, height: SIZE, borderRadius: RADIUS.sm } as const;
-
-  return (
-    <Pressable style={{ position: "relative" }} onPress={onPress}>
-      <MediaTile
-        uri={post.mediaUrl || null}
-        mediaType={post.mediaType}
-        style={thumbStyle}
-        context="ProfileGrid"
-      />
-      {/* Video badge overlay */}
-      {post.mediaType === "video" && (
-        <View
-          style={{
-            position: "absolute",
-            top: 4,
-            right: 4,
-            backgroundColor: "rgba(0,0,0,0.6)",
-            borderRadius: RADIUS.xs,
-            paddingHorizontal: 4,
-            paddingVertical: 1,
-          }}
-        >
-          <Text style={{ color: COLORS.white, fontSize: 9, fontWeight: FONTS.bold }}>
-            VIDEO
-          </Text>
-        </View>
-      )}
-    </Pressable>
-  );
-}
-
-function PostDetailModal({
-  post,
-  visible,
-  onClose,
-  currentUserId,
-  onBattle,
-  isBattling,
-}: {
-  post: Post | null;
-  visible: boolean;
-  onClose: () => void;
-  currentUserId: string | null;
-  onBattle: (post: Post) => void;
-  isBattling: boolean;
-}) {
-  if (!post) return null;
-
-  return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <SafeAreaView style={styles.postModalSafe} edges={["top"]}>
-        <View style={styles.postModalTopBar}>
-          <Pressable
-            onPress={onClose}
-            style={styles.backBtn}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          >
-            <Text style={styles.backIcon}>‹</Text>
-          </Pressable>
-        </View>
-        <PostCard
-          post={post}
-          isLiked={false}
-          onLike={() => undefined}
-          currentUserId={currentUserId}
-          onBattle={onBattle}
-          isBattling={isBattling}
-          enableVideoPlayback
-          isActiveVideo
-        />
-      </SafeAreaView>
-    </Modal>
-  );
-}
-
-function BattleHistoryCard({
-  battle,
-  userId,
-  currentUserId,
-}: {
-  battle: Battle;
-  userId: string;
-  currentUserId: string | null;
-}) {
-  const router = useRouter();
-  const mine = battle.playerA?.userId === userId ? battle.playerA : battle.playerB;
-  const opponent = battle.playerA?.userId === userId ? battle.playerB : battle.playerA;
-  const result = battle.winner
-    ? battle.winner === userId
-      ? "WIN"
-      : "LOSS"
-    : battle.status.toUpperCase();
-  const resultStyle = result === "WIN" ? styles.resultWin : result === "LOSS" ? styles.resultLoss : styles.resultLive;
-  const date = formatBattleDate(battle.createdAt);
-
-  return (
-    <View style={styles.battleCard}>
-      {/* MediaTile fills the 68×68 battleThumb container safely on iOS */}
-      <MediaTile
-        uri={mine?.mediaUrl || null}
-        mediaType={mine?.mediaType}
-        style={styles.battleThumb}
-        context="BattleHistoryCard"
-      />
-      <View style={styles.battleInfo}>
-        <View style={styles.battleMetaRow}>
-          <Text style={[styles.resultPill, resultStyle]}>{result}</Text>
-          <Text style={styles.battleDate}>{date}</Text>
-        </View>
-        <Text style={styles.battleTitle} numberOfLines={1}>
-          {battle.category || "Battle"}
-        </Text>
-        {/* Opponent name: tappable to navigate to their profile */}
-        {opponent?.userId ? (
-          <Pressable
-            onPress={() => openAthleteProfile(router, opponent!.userId, currentUserId)}
-            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-          >
-            <Text style={[styles.battleOpponent, styles.battleOpponentLink]} numberOfLines={1}>
-              vs {opponent.username}
-            </Text>
-          </Pressable>
-        ) : (
-          <Text style={styles.battleOpponent} numberOfLines={1}>
-            vs {opponent?.username || "Open challenge"}
-          </Text>
-        )}
-      </View>
-    </View>
-  );
-}
-
-function formatBattleDate(value: Battle["createdAt"]) {
-  if (!value) return "Recent";
-  const date =
-    typeof value.toDate === "function"
-      ? value.toDate()
-      : new Date((value as { seconds?: number }).seconds ? (value as { seconds: number }).seconds * 1000 : Date.now());
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
-
 // ─── Main Profile Screen ──────────────────────────────────────────────────────
 export default function ProfileScreen() {
+  const router = useRouter();
   const userId = useAuthStore((s) => s.userId);
   const profileStore = useAuthStore((s) => s.profile);
   const setProfile = useAuthStore((s) => s.setProfile);
   const clearAuth = useAuthStore((s) => s.clear);
 
   const { posts, loading: postsLoading, refresh: refreshPosts } = useUserPosts(userId);
-  const { battles, loading: battlesLoading } = useBattles(userId);
+  // includeVotes=false: this screen only renders battle history rows and never
+  // shows or casts votes, so skip the votedMap lookups (3 Firestore `in`
+  // queries per mount).
+  const { battles, loading: battlesLoading } = useBattles(userId, false);
   const [editVisible, setEditVisible] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [activeTab, setActiveTab] = useState<ProfileTab>("posts");
   const [selectedPost, setSelectedPost] = useState<Post | null>(null);
   const [startingBattlePostId, setStartingBattlePostId] = useState<string | null>(null);
 
+  // Collapsing header — scroll offset lives on the UI thread only.
+  const scrollY = useSharedValue(0);
+  const scrollHandler = useAnimatedScrollHandler((event) => {
+    scrollY.value = event.contentOffset.y;
+  });
+
   const profile = profileStore;
-  const profileHandle = `@${profile?.username?.trim().toLowerCase().replace(/\s+/g, "") || "player"}`;
   const profileBattles = useMemo(
     () =>
       battles.filter(
@@ -575,149 +488,160 @@ export default function ProfileScreen() {
     }
   }
 
+  // ── Derived lists (memoized — no extra queries, no re-sorting per render) ──
+  const sortedPosts = useMemo(() => {
+    const pinned = posts.filter((p) => p.pinned);
+    if (pinned.length === 0) return posts;
+    return [...pinned, ...posts.filter((p) => !p.pinned)];
+  }, [posts]);
+
+  const highlightPosts = useMemo(
+    () => sortedPosts.filter((p) => isVideoMedia(p.mediaUrl, p.mediaType)),
+    [sortedPosts]
+  );
+
+  const hasTrendingPost = useMemo(
+    () => posts.some((p) => p.likesCount >= TRENDING_LIKES_THRESHOLD),
+    [posts]
+  );
+
+  const handleTabChange = useCallback(
+    (tab: ProfileTab) => {
+      scrollY.value = 0; // list remounts at top; keep the compact bar in sync
+      setActiveTab(tab);
+    },
+    [scrollY]
+  );
+
+  const handleShareProfile = useCallback(async () => {
+    if (!profile) return;
+    const message = `Check out ${profile.username} (${toHandle(profile.username)}) on Momentum — highlights, battles, and more.`;
+    try {
+      await Share.share({ message });
+    } catch {
+      // Share sheet unavailable (e.g. desktop web) — non-fatal.
+    }
+  }, [profile]);
+
   if (!profile) return <LoadingSpinner fullscreen />;
 
-  const listData = activeTab === "posts" ? posts : activeTab === "battles" ? profileBattles : [];
-  const tabs: { key: ProfileTab; label: string }[] = [
-    { key: "posts", label: "Posts" },
-    { key: "battles", label: "Battles" },
-    { key: "saved", label: "Saved" },
-  ];
+  const isGridTab = activeTab === "posts" || activeTab === "highlights";
+  const listData: (Post | Battle)[] =
+    activeTab === "posts"
+      ? sortedPosts
+      : activeTab === "highlights"
+      ? highlightPosts
+      : activeTab === "battles"
+      ? profileBattles
+      : [];
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <FlatList<Post | Battle>
+      <Animated.FlatList
         key={activeTab}
         data={listData}
-        keyExtractor={(item) => item.id}
-        numColumns={activeTab === "posts" ? 3 : 1}
-        columnWrapperStyle={activeTab === "posts" ? { gap: SPACING.sm } : undefined}
+        keyExtractor={(item: Post | Battle) => item.id}
+        numColumns={isGridTab ? 3 : 1}
+        columnWrapperStyle={isGridTab ? { gap: SPACING.sm } : undefined}
         contentContainerStyle={styles.grid}
-        renderItem={({ item }) =>
-          activeTab === "posts" ? (
-            <PostThumb post={item as Post} onPress={() => setSelectedPost(item as Post)} />
+        initialNumToRender={isGridTab ? 15 : 8}
+        windowSize={9}
+        onScroll={scrollHandler}
+        scrollEventThrottle={16}
+        renderItem={({ item }: { item: Post | Battle }) =>
+          isGridTab ? (
+            <PostGridThumb
+              post={item as Post}
+              onPress={() => setSelectedPost(item as Post)}
+              context="ProfileGrid"
+            />
           ) : (
             <BattleHistoryCard battle={item as Battle} userId={userId ?? ""} currentUserId={userId} />
           )
         }
         ListHeaderComponent={
-          <View style={styles.profileHeader}>
-            {/* ── Settings icon top-right ─────────────────────────────────── */}
-            <View style={styles.profileTopBar}>
-              <View style={styles.profileTopBarSpacer} />
-              <Pressable
-                onPress={handleSignOut}
-                style={styles.settingsBtn}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              >
-                <Text style={styles.settingsIcon}>⚙</Text>
-              </Pressable>
-            </View>
-
-            {/* ── Identity: avatar + name/handle ──────────────────────────── */}
-            <View style={styles.identityRow}>
-              {/* Avatar with neon ring */}
-              <View style={styles.avatarRingWrap}>
-                <AvatarImage uri={profile.avatar} username={profile.username} size={104} />
-              </View>
-              <View style={styles.identityText}>
-                <Text style={styles.username}>{profile.username}</Text>
-                <Text style={styles.handle}>{profileHandle}</Text>
-              </View>
-            </View>
-
-            {/* ── Stats row with dividers ─────────────────────────────────── */}
-            {/* posts.length is used instead of profile.posts because Firestore
-                rules block client-side updates to the posts counter field, so
-                profile.posts is always stale. The posts array is already fresh
-                from useUserPosts which is refreshed on every focus. */}
-            <View style={styles.statsRow}>
-              <Stat label="Posts" value={posts.length} />
-              <View style={styles.statDivider} />
-              <Stat label="Wins" value={profile.wins} />
-              <View style={styles.statDivider} />
-              <Stat label="Losses" value={profile.losses} />
-            </View>
-
-            {/* ── Bio / sport / school lines ──────────────────────────────── */}
-            {(profile.athleteType || profile.bio) ? (
-              <View style={styles.bioSection}>
-                {profile.athleteType ? (
-                  <Text style={styles.sport}>{profile.athleteType}</Text>
-                ) : null}
-                {profile.bio ? (
-                  <Text style={styles.bio}>{profile.bio}</Text>
-                ) : null}
-              </View>
-            ) : null}
-
-            {/* ── Action buttons ──────────────────────────────────────────── */}
-            <View style={styles.actionRow}>
-              <GlowButton
-                label="Edit Profile"
-                onPress={() => setEditVisible(true)}
-                variant="secondary"
-                size="sm"
-                style={{ flex: 1 }}
-              />
-              <GlowButton
-                label="Sign Out"
-                onPress={handleSignOut}
-                loading={signingOut}
-                variant="ghost"
-                size="sm"
-                style={{ flex: 1 }}
-              />
-            </View>
-
-            {/* ── Posts / Battles / Saved tabs ────────────────────────────── */}
-            <View style={styles.tabs}>
-              {tabs.map((tab) => {
-                const isActive = activeTab === tab.key;
-                return (
-                  <Pressable
-                    key={tab.key}
-                    onPress={() => setActiveTab(tab.key)}
-                    style={styles.tabButton}
-                  >
-                    <Text style={[styles.tabText, isActive && styles.tabTextActive]}>
-                      {tab.label}
-                    </Text>
-                    <View style={[styles.tabUnderline, isActive && styles.tabUnderlineActive]} />
-                  </Pressable>
-                );
-              })}
-            </View>
+          <View style={styles.headerWrap}>
+            <ProfileHeader
+              profile={profile}
+              postsCount={posts.length}
+              battlesCount={profileBattles.length}
+              isOwn
+              hasTrendingPost={hasTrendingPost}
+              onEdit={() => setEditVisible(true)}
+              onShare={handleShareProfile}
+              scrollY={scrollY}
+            />
+            <ProfileTabs
+              tabs={PROFILE_TABS}
+              activeKey={activeTab}
+              onChange={handleTabChange}
+            />
           </View>
         }
         ListEmptyComponent={
           activeTab === "posts" && postsLoading ? (
-            <LoadingSpinner label="Loading posts…" />
+            <ProfileGridSkeleton />
+          ) : activeTab === "highlights" && postsLoading ? (
+            <ProfileGridSkeleton />
           ) : activeTab === "battles" && battlesLoading ? (
             <LoadingSpinner label="Loading battles…" />
           ) : activeTab === "battles" ? (
             <EmptyState
               icon="⚔️"
-              title="No battle history"
-              subtitle="Completed battles will show up here."
+              title="Challenge another athlete"
+              subtitle="Win battles to build your record — victories show up here."
+              actionLabel="Find a battle"
+              onAction={() => router.push("/battles" as never)}
             />
           ) : activeTab === "saved" ? (
             <EmptyState
               icon="🔖"
-              title="No saved posts"
-              subtitle="Saved posts will show up here."
+              title="No saved posts yet"
+              subtitle="Highlights you save will live here."
+            />
+          ) : activeTab === "highlights" ? (
+            <EmptyState
+              icon="🎬"
+              title="No video highlights yet"
+              subtitle="Video posts appear here automatically."
+              actionLabel="Upload a highlight"
+              onAction={() => router.push("/create" as never)}
+            />
+          ) : !profile.bio ? (
+            <EmptyState
+              icon="📋"
+              title="Complete your profile"
+              subtitle="Add your sport, bio, and first highlight so coaches can find you."
+              actionLabel="Edit Profile"
+              onAction={() => setEditVisible(true)}
             />
           ) : (
             <EmptyState
-              icon="📷"
-              title="Complete your athlete profile"
-              subtitle="Add your sport, bio, and first highlight."
-              actionLabel="Edit Profile"
-              onAction={() => setEditVisible(true)}
+              icon="🎬"
+              title="Upload your first highlight"
+              subtitle="Your best plays belong on your profile."
+              actionLabel="Upload a highlight"
+              onAction={() => router.push("/create" as never)}
             />
           )
         }
         showsVerticalScrollIndicator={false}
+      />
+
+      {/* Collapsing compact bar — name fades in as the header scrolls away */}
+      <ProfileCompactBar
+        username={profile.username}
+        avatarUri={profile.avatarUrl || profile.avatar}
+        verified={profile.verified}
+        scrollY={scrollY}
+        right={
+          <IconButton
+            icon="log-out"
+            accessibilityLabel="Sign out"
+            onPress={handleSignOut}
+            disabled={signingOut}
+          />
+        }
       />
 
       <EditProfileModal
@@ -739,237 +663,22 @@ export default function ProfileScreen() {
   );
 }
 
-function Stat({ label, value }: { label: string; value: number }) {
-  return (
-    <View style={styles.stat}>
-      <Text style={styles.statValue}>{value}</Text>
-      <Text style={styles.statLabel}>{label}</Text>
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: COLORS.background },
-  postModalSafe: { flex: 1, backgroundColor: COLORS.background },
-  postModalTopBar: {
-    paddingHorizontal: SPACING.lg,
-    paddingTop: SPACING.sm,
-    paddingBottom: SPACING.xs,
-  },
-  backBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: COLORS.surface,
-    borderWidth: 1,
-    borderColor: COLORS.cardBorder,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  backIcon: { color: COLORS.textPrimary, fontSize: 22, lineHeight: 28, marginTop: -2 },
 
-  profileHeader: {
-    paddingBottom: 0,
-    backgroundColor: COLORS.background,
-  },
-
-  // ── Top bar (settings) ────────────────────────────────────────────────────
-  profileTopBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: SPACING.lg,
-    paddingTop: SPACING.md,
-    paddingBottom: SPACING.sm,
-  },
-  profileTopBarSpacer: { flex: 1 },
-  settingsBtn: {
-    width: 36, height: 36,
-    borderRadius: 18,
-    backgroundColor: COLORS.surface,
-    borderWidth: 1,
-    borderColor: COLORS.cardBorder,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  settingsIcon: { color: COLORS.textSecondary, fontSize: 18 },
-
-  // ── Identity ──────────────────────────────────────────────────────────────
-  identityRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: SPACING.lg,
-    paddingBottom: SPACING.lg,
-    gap: SPACING.lg,
-  },
-  avatarRingWrap: {
-    borderRadius: 56,
-    borderWidth: 3,
-    borderColor: COLORS.accent,
-    padding: 1,
-    overflow: "hidden",
-  },
-  identityText: { flex: 1 },
-  username: {
-    color: COLORS.textPrimary,
-    fontSize: 24,
-    fontWeight: FONTS.heavy,
-    letterSpacing: 0.3,
-    marginBottom: 3,
-  },
-  handle: {
-    color: COLORS.textHandle,
-    fontSize: 14,
-    fontWeight: FONTS.medium,
-  },
-
-  // ── Stats ─────────────────────────────────────────────────────────────────
-  statsRow: {
-    flexDirection: "row",
-    justifyContent: "center",
-    alignItems: "center",
-    paddingVertical: SPACING.lg,
-    paddingHorizontal: SPACING.xl,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.cardBorder,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.cardBorder,
-    marginBottom: SPACING.md,
-  },
-  stat: {
-    flex: 1,
-    alignItems: "center",
-  },
-  statDivider: {
-    width: 1,
-    height: 36,
-    backgroundColor: COLORS.cardBorder,
-  },
-  statValue: {
-    color: COLORS.textPrimary,
-    fontSize: 22,
-    fontWeight: FONTS.heavy,
-  },
-  statLabel: {
-    color: COLORS.textMuted,
-    fontSize: 11,
-    marginTop: 3,
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-  },
-
-  // ── Bio / sport ───────────────────────────────────────────────────────────
-  bioSection: {
-    paddingHorizontal: SPACING.lg,
-    paddingBottom: SPACING.md,
-    gap: 4,
-    alignItems: "center",
-  },
-  sport: {
-    color: COLORS.accent,
-    fontSize: 13,
-    fontWeight: FONTS.bold,
-    textAlign: "center",
-    alignSelf: "center",
-    backgroundColor: COLORS.accentFaint,
-    borderWidth: 1,
-    borderColor: COLORS.accent,
-    borderRadius: RADIUS.full,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: 3,
-    overflow: "hidden",
-    marginBottom: 2,
-  },
-  bio: {
-    color: COLORS.textSecondary,
-    fontSize: 13,
-    lineHeight: 20,
-    textAlign: "center",
-  },
-
-  // ── Action buttons ────────────────────────────────────────────────────────
-  actionRow: {
-    flexDirection: "row",
-    gap: SPACING.sm,
-    marginHorizontal: SPACING.lg,
-    marginBottom: SPACING.md,
-  },
-
-  // ── Tabs ──────────────────────────────────────────────────────────────────
-  tabs: {
-    flexDirection: "row",
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.cardBorder,
-    paddingHorizontal: SPACING.lg,
+  // Header + tabs render full-bleed inside the padded grid container.
+  headerWrap: {
+    marginHorizontal: -SPACING.lg,
     marginBottom: SPACING.sm,
   },
-  tabButton: {
-    flex: 1,
-    alignItems: "center",
-    paddingTop: SPACING.sm,
-    paddingBottom: 0,
-  },
-  tabText: {
-    color: COLORS.textMuted,
-    fontSize: 14,
-    fontWeight: FONTS.bold,
-    letterSpacing: 0.2,
-  },
-  tabTextActive: { color: COLORS.textPrimary },
-  tabUnderline: {
-    width: "80%",
-    height: 3,
-    borderRadius: 3,
-    backgroundColor: COLORS.transparent,
-    marginTop: SPACING.sm + 2,
-  },
-  tabUnderlineActive: { backgroundColor: COLORS.accent },
 
   // ── Grid ─────────────────────────────────────────────────────────────────
+  // paddingHorizontal must stay SPACING.lg — PostGridThumb's CELL math and
+  // ProfileGridSkeleton both assume it.
   grid: {
-    paddingHorizontal: SPACING.md,
+    paddingTop: COMPACT_BAR_HEIGHT,
+    paddingHorizontal: SPACING.lg,
     paddingBottom: SPACING.xxxl,
     gap: SPACING.sm,
   },
-
-  // ── Battle history cards ──────────────────────────────────────────────────
-  battleCard: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.md,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.cardBorder,
-    gap: SPACING.md,
-  },
-  battleThumb: {
-    width: 68,
-    height: 68,
-    borderRadius: RADIUS.md,
-    overflow: "hidden",
-    backgroundColor: COLORS.surface,
-    flexShrink: 0,
-  },
-  battleInfo: { flex: 1 },
-  battleMetaRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 4,
-  },
-  resultPill: {
-    overflow: "hidden",
-    borderRadius: RADIUS.full,
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: 3,
-    fontSize: 11,
-    fontWeight: FONTS.heavy,
-  },
-  resultWin:  { color: COLORS.accent, backgroundColor: COLORS.accentFaint },
-  resultLoss: { color: COLORS.error, backgroundColor: COLORS.errorFaint },
-  resultLive: { color: COLORS.textSecondary, backgroundColor: COLORS.input },
-  battleDate: { color: COLORS.textMuted, fontSize: 12 },
-  battleTitle: { color: COLORS.textPrimary, fontSize: 15, fontWeight: FONTS.bold, marginBottom: 2 },
-  battleOpponent: { color: COLORS.textSecondary, fontSize: 13 },
-  battleOpponentLink: { color: COLORS.accent, textDecorationLine: "underline" },
 });

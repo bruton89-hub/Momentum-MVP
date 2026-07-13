@@ -18,6 +18,30 @@ export interface UserProfile {
   losses: number;
   createdAt: Timestamp | null;
   updatedAt?: Timestamp | null;
+  // ── Athlete identity (optional — rendered only when present) ────────────────
+  /** Playing position, e.g. "QB", "Point Guard". */
+  position?: string;
+  /** School / program name. */
+  school?: string;
+  /** Club / team name — shown when no school is present. */
+  teamName?: string;
+  /** Home city. */
+  city?: string;
+  /** Home state / region. */
+  state?: string;
+  /** Graduation year, e.g. "2027". */
+  gradYear?: string;
+  // ── Status / achievements (optional — never fabricated client-side) ─────────
+  /** Verified athlete — green ring + check + badge. */
+  verified?: boolean;
+  /** Verified by a coach (future-ready). */
+  coachVerified?: boolean;
+  /** Momentum Score (platform ranking metric). */
+  momentumScore?: number;
+  /** Tournament champion achievement. */
+  tournamentChampion?: boolean;
+  /** Top-ranked athlete flag. */
+  topRanked?: boolean;
 }
 
 // ─── Post ─────────────────────────────────────────────────────────────────────
@@ -35,6 +59,47 @@ export interface Post {
   battleEnabled: boolean;
   originalMediaUrl?: string;
   videoEdit?: PostVideoEdit;
+  createdAt: Timestamp | null;
+  // ── Athlete identity (optional — rendered in the feed overlay when present) ──
+  /** Sport the athlete plays, e.g. "Football". Falls back to author profile data. */
+  sport?: string;
+  /** Playing position, e.g. "QB", "Point Guard". */
+  position?: string;
+  /** School / program name, e.g. "Lincoln High". */
+  school?: string;
+  /** Club / team name — shown when no school is present. */
+  teamName?: string;
+  /** Home city, e.g. "Dallas". */
+  city?: string;
+  /** Home state / region, e.g. "TX". */
+  state?: string;
+  /** Graduation year, e.g. "2027". */
+  gradYear?: string;
+  /** Verified athlete — earns the Momentum-green ring + check badge. */
+  verified?: boolean;
+  /** Momentum Score (platform ranking metric), shown as a badge when present. */
+  momentumScore?: number;
+  /** Post is a live stream / live tagged clip. */
+  isLive?: boolean;
+  /** Post won a battle — earns the Battle Winner badge. */
+  battleWon?: boolean;
+  /** Pinned to the top of the athlete's profile grid. */
+  pinned?: boolean;
+  /** Comment count — optional, rendered only when the backend writes it. */
+  commentsCount?: number;
+}
+
+// ─── Comment ──────────────────────────────────────────────────────────────────
+// Flat, post-scoped comments. The backend stores no reply relationships —
+// do not infer or render nesting.
+
+export interface PostComment {
+  id: string;
+  postId: string;
+  userId: string;
+  username: string;
+  avatar: string;
+  text: string;
   createdAt: Timestamp | null;
 }
 

@@ -103,7 +103,11 @@ export default function LoginScreen() {
               returnKeyType="go"
             />
 
-            {error ? <Text style={styles.error}>{error}</Text> : null}
+            {error ? (
+              <Text style={styles.error} accessibilityRole="alert">
+                {error}
+              </Text>
+            ) : null}
 
             <GlowButton
               label="Login"
@@ -114,11 +118,21 @@ export default function LoginScreen() {
               style={styles.btn}
             />
 
-            <Pressable disabled={loading} style={styles.forgotRow}>
+            <Pressable
+              disabled={loading}
+              accessibilityRole="button"
+              accessibilityLabel="Forgot password"
+              style={({ pressed }) => [styles.forgotRow, pressed && { opacity: 0.7 }]}
+            >
               <Text style={styles.forgotText}>Forgot Password?</Text>
             </Pressable>
 
-            <Pressable onPress={() => router.push("/(auth)/register")} style={styles.switchRow}>
+            <Pressable
+              onPress={() => router.push("/(auth)/register")}
+              accessibilityRole="link"
+              accessibilityLabel="Create a new account"
+              style={({ pressed }) => [styles.switchRow, pressed && { opacity: 0.7 }]}
+            >
               <Text style={styles.switchText}>
                 New here?{" "}
                 <Text style={styles.switchLink}>Create Account</Text>

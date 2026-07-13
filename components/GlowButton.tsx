@@ -7,7 +7,7 @@ import {
   ViewStyle,
   TextStyle,
 } from "react-native";
-import { COLORS, RADIUS, SPACING, FONTS } from "@/constants/theme";
+import { COLORS, RADIUS, SPACING, FONTS, GLOW, TYPE } from "@/constants/theme";
 
 interface Props {
   label: string;
@@ -16,8 +16,11 @@ interface Props {
   loading?: boolean;
   variant?: "primary" | "secondary" | "ghost" | "danger";
   size?: "sm" | "md" | "lg";
+  /** Neon glow shadow — on by default for primary; set false to disable. */
+  glow?: boolean;
   style?: ViewStyle;
   textStyle?: TextStyle;
+  accessibilityLabel?: string;
 }
 
 export default function GlowButton({
@@ -27,19 +30,26 @@ export default function GlowButton({
   loading = false,
   variant = "primary",
   size = "md",
+  glow,
   style,
   textStyle,
+  accessibilityLabel,
 }: Props) {
   const isDisabled = disabled || loading;
+  const showGlow = (glow ?? variant === "primary") && !isDisabled;
 
   return (
     <Pressable
       onPress={onPress}
       disabled={isDisabled}
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel ?? label}
+      accessibilityState={{ disabled: isDisabled, busy: loading }}
       style={({ pressed }) => [
         styles.base,
         styles[variant],
         styles[`size_${size}`],
+        showGlow && GLOW.accent,
         pressed && styles.pressed,
         isDisabled && styles.disabled,
         style,
@@ -72,7 +82,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     borderRadius: RADIUS.md,
   },
-  pressed: { opacity: 0.82 },
+  pressed: { opacity: 0.82, transform: [{ scale: 0.98 }] },
   disabled: { opacity: 0.45 },
 
   // Variants
@@ -103,7 +113,7 @@ const styles = StyleSheet.create({
   text_ghost: { color: COLORS.accent },
   text_danger: { color: COLORS.white },
 
-  textSize_sm: { fontSize: 13 },
-  textSize_md: { fontSize: 15 },
-  textSize_lg: { fontSize: 17 },
+  textSize_sm: { fontSize: TYPE.footnote },
+  textSize_md: { fontSize: TYPE.base },
+  textSize_lg: { fontSize: TYPE.callout + 1 },
 });

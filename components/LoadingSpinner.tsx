@@ -9,7 +9,12 @@ interface Props {
 
 export default function LoadingSpinner({ label, fullscreen = false }: Props) {
   return (
-    <View style={[styles.container, fullscreen && styles.fullscreen]}>
+    <View
+      style={[styles.container, fullscreen && styles.fullscreen]}
+      accessible
+      accessibilityRole="progressbar"
+      accessibilityLabel={label ?? "Loading"}
+    >
       <ActivityIndicator size="large" color={COLORS.accent} />
       {label ? <Text style={styles.label}>{label}</Text> : null}
     </View>
