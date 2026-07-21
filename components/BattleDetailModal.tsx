@@ -23,6 +23,7 @@ import {
   Dimensions,
 } from "react-native";
 import { useRouter } from "expo-router";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
 import Animated, { FadeInDown, useReducedMotion } from "react-native-reanimated";
 import { COLORS, FONTS, SPACING, RADIUS, TYPE, HIT_SLOP } from "@/constants/theme";
@@ -201,6 +202,7 @@ export default function BattleDetailModal({
   onSkip,
 }: Props) {
   const reducedMotion = useReducedMotion();
+  const insets = useSafeAreaInsets();
   // Duplicate-tap guard: once a vote button is pressed, both buttons lock
   // until the vote resolves (userVote changes) or a different battle opens.
   // If the backend rejects the vote, the parent reverts optimistic state and
@@ -255,15 +257,6 @@ export default function BattleDetailModal({
     }
   }
 
-  __DEV__ && console.log("[battleDetail] opened —", {
-    battleId: battle.id,
-    status,
-    category: battle.category,
-    isOwner,
-    canVote,
-    userVote,
-  });
-
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
       <View style={detail.overlay2}>
@@ -287,7 +280,12 @@ export default function BattleDetailModal({
             style={detail.shareBtn}
           />
 
-          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: SPACING.xxxl }}>
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            // SAFE AREA: sheet rests on the screen edge — last content must
+            // clear the home indicator.
+            contentContainerStyle={{ paddingBottom: insets.bottom + SPACING.xl }}
+          >
             {/* Status row */}
             <View style={detail.statusRow}>
               <BattleStatusBadge status={status} />

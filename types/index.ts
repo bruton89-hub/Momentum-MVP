@@ -138,6 +138,35 @@ export interface Battle {
   createdAt: Timestamp | null;
 }
 
+// ─── Notification ─────────────────────────────────────────────────────────────
+// Written by the acting user (actorId == auth.uid) with deterministic doc IDs
+// so repeated actions can never create duplicates. `subject*` fields carry the
+// identity shown in the row (usually the actor; for battle results, the
+// recipient's opponent — the finalizing viewer is incidental).
+
+export type NotificationType =
+  | "follow"
+  | "comment"
+  | "challenge_received"
+  | "challenge_accepted"
+  | "battle_completed"
+  | "battle_won";
+
+export interface MomentumNotification {
+  id: string;
+  type: NotificationType;
+  recipientId: string;
+  actorId: string;
+  subjectUsername: string;
+  subjectAvatar: string;
+  /** Comment snippet for type "comment". */
+  preview?: string;
+  postId?: string;
+  battleId?: string;
+  read: boolean;
+  createdAt: Timestamp | null;
+}
+
 // ─── Vote ─────────────────────────────────────────────────────────────────────
 
 export interface Vote {

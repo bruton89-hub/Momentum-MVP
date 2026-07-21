@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -101,6 +101,7 @@ export default function CreateScreen() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
   const [publishedWithChallenge, setPublishedWithChallenge] = useState(false);
+  const publishingRef = useRef(false);
 
   const busy = isUploading || isSubmitting;
   const hasUnsavedWork =
@@ -157,7 +158,6 @@ export default function CreateScreen() {
           );
           return;
         }
-        __DEV__ && console.log("Create Post selectedMedia[0]", asset);
         setSelectedMedia([asset]);
         setMediaUri(asset.uri);
         setMediaType(asset.type === "video" ? "video" : "image");
@@ -219,7 +219,7 @@ export default function CreateScreen() {
   }
 
   async function handlePost() {
-    if (busy) return; // duplicate-tap guard
+    if (busy || publishingRef.current) return;
     if (!userId || !profile) {
       Alert.alert("Sign in required", "Please sign in to post.");
       return;
@@ -230,6 +230,7 @@ export default function CreateScreen() {
     }
 
     Keyboard.dismiss();
+    publishingRef.current = true;
     setIsUploading(true);
     setUploadProgress(0);
 
@@ -290,6 +291,7 @@ export default function CreateScreen() {
         `${message}\n\nYour highlight and details are still here — you can retry.`
       );
     } finally {
+      publishingRef.current = false;
       setIsUploading(false);
       setIsSubmitting(false);
     }

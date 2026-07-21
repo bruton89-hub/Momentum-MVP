@@ -14,6 +14,7 @@
 import type { useRouter } from "expo-router";
 
 type Router = ReturnType<typeof useRouter>;
+let lastProfileNavigation = { key: "", at: 0 };
 
 /**
  * Navigate to an athlete's profile correctly:
@@ -30,6 +31,15 @@ export function openAthleteProfile(
   currentUserId: string | null | undefined
 ): void {
   if (!targetUserId) return;
+  const now = Date.now();
+  const key = `${currentUserId ?? "guest"}:${targetUserId}`;
+  if (
+    lastProfileNavigation.key === key &&
+    now - lastProfileNavigation.at < 700
+  ) {
+    return;
+  }
+  lastProfileNavigation = { key, at: now };
   if (targetUserId === currentUserId) {
     router.navigate("/(tabs)/profile" as never);
   } else {

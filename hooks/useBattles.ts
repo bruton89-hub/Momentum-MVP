@@ -16,6 +16,8 @@ import {
 } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { auth, db, functions } from "@/config/firebase";
+import { notifyBattleResults } from "@/services/notificationRepository";
+import { startDevMetricTimer } from "@/utils/performance";
 import type { Battle, BattlePlayer, Vote } from "@/types";
 
 // ─── Server-authoritative finalization ───────────────────────────────────────
@@ -38,6 +40,86 @@ type CastBattleVoteResult = {
 };
 
 const BATTLES_PAGE_SIZE = 30;
+const BATTLES_CACHE_TTL_MS = 15_000;
+const FIRESTORE_IN_LIMIT = 30;
+
+type CachedBattlePage = { battles: Battle[]; fetchedAt: number };
+type BattlePageLoad = {
+  battles: Battle[];
+  source: "network" | "cache" | "in-flight";
+  queryCount: number;
+};
+type VoteLoad = {
+  votedMap: Map<string, "A" | "B">;
+  source: "network" | "cache" | "in-flight";
+  queryCount: number;
+};
+
+let cachedBattlePage: CachedBattlePage | null = null;
+let battlePageInFlight: Promise<Battle[]> | null = null;
+const voteCache = new Map<
+  string,
+  { votedMap: Map<string, "A" | "B">; fetchedAt: number }
+>();
+const voteLoadsInFlight = new Map<string, Promise<Map<string, "A" | "B">>>();
+
+function isFresh(fetchedAt: number): boolean {
+  return Date.now() - fetchedAt < BATTLES_CACHE_TTL_MS;
+}
+
+function peekBattleCache(): Battle[] | null {
+  return cachedBattlePage && isFresh(cachedBattlePage.fetchedAt)
+    ? cachedBattlePage.battles
+    : null;
+}
+
+function invalidateBattleCache(): void {
+  cachedBattlePage = null;
+}
+
+function invalidateVoteCache(userId: string): void {
+  for (const key of voteCache.keys()) {
+    if (key.startsWith(`${userId}:`)) voteCache.delete(key);
+  }
+}
+
+async function loadBattlePage(forceNetwork: boolean): Promise<BattlePageLoad> {
+  const cached = peekBattleCache();
+  if (!forceNetwork && cached) {
+    return { battles: cached, source: "cache", queryCount: 0 };
+  }
+  if (battlePageInFlight) {
+    return {
+      battles: await battlePageInFlight,
+      source: "in-flight",
+      queryCount: 0,
+    };
+  }
+
+  battlePageInFlight = getDocs(
+    query(
+      collection(db, "battles"),
+      orderBy("createdAt", "desc"),
+      limit(BATTLES_PAGE_SIZE)
+    )
+  ).then((snapshot) => {
+    const battles = snapshot.docs.map((d) =>
+      normalizeBattle(d.id, d.data() as Record<string, unknown>)
+    );
+    cachedBattlePage = { battles, fetchedAt: Date.now() };
+    return battles;
+  });
+
+  try {
+    return {
+      battles: await battlePageInFlight,
+      source: "network",
+      queryCount: 1,
+    };
+  } finally {
+    battlePageInFlight = null;
+  }
+}
 
 const finalizeBattleCallable = httpsCallable<
   { battleId: string },
@@ -243,13 +325,6 @@ export async function createBattle(input: CreateBattleInput): Promise<string> {
   const endTime = Timestamp.fromMillis(
     Date.now() + input.durationHours * 3_600_000
   );
-  __DEV__ && console.log("[createBattle] creating —", {
-    creatorId: input.creatorId,
-    playerA: { userId: input.playerA.userId, username: input.playerA.username,
-               mediaType: input.playerA.mediaType, hasMedia: !!input.playerA.mediaUrl },
-    category: input.category,
-    durationHours: input.durationHours,
-  });
   try {
     const docRef = await addDoc(collection(db, "battles"), {
       creatorId: input.creatorId,
@@ -265,7 +340,7 @@ export async function createBattle(input: CreateBattleInput): Promise<string> {
       statsRecorded: false,
       createdAt: serverTimestamp(),
     });
-    __DEV__ && console.log("[createBattle] success — battleId:", docRef.id);
+    invalidateBattleCache();
     return docRef.id;
   } catch (err) {
     console.error("[createBattle] error:", err);
@@ -299,13 +374,6 @@ export async function createLiveBattle(input: CreateLiveBattleInput): Promise<st
   const endTime = Timestamp.fromMillis(
     Date.now() + input.durationHours * 3_600_000
   );
-  __DEV__ && console.log("[createLiveBattle] creating —", {
-    creatorId: input.creatorId,
-    playerA: { userId: input.playerA.userId, username: input.playerA.username },
-    playerB: { userId: input.playerB.userId, username: input.playerB.username },
-    category: input.category,
-    durationHours: input.durationHours,
-  });
   try {
     const docRef = await addDoc(collection(db, "battles"), {
       creatorId: input.creatorId,
@@ -321,7 +389,7 @@ export async function createLiveBattle(input: CreateLiveBattleInput): Promise<st
       statsRecorded: false,
       createdAt: serverTimestamp(),
     });
-    __DEV__ && console.log("[createLiveBattle] success — battleId:", docRef.id);
+    invalidateBattleCache();
     return docRef.id;
   } catch (err) {
     console.error("[createLiveBattle] error:", err);
@@ -375,17 +443,12 @@ export async function acceptChallenge(
   battleId: string,
   playerB: BattlePlayer
 ): Promise<void> {
-  __DEV__ && console.log("[acceptChallenge] accepting —", {
-    battleId,
-    playerB: { userId: playerB.userId, username: playerB.username,
-               mediaType: playerB.mediaType, hasMedia: !!playerB.mediaUrl },
-  });
   try {
     await updateDoc(doc(db, "battles", battleId), {
       playerB,
       status: "live",
     });
-    __DEV__ && console.log("[acceptChallenge] success — battleId:", battleId);
+    invalidateBattleCache();
   } catch (err) {
     console.error("[acceptChallenge] error — battleId:", battleId, err);
     throw err;
@@ -404,6 +467,17 @@ export async function submitVote(
     side,
     clientMutationId: `${battleId}:${userId}`,
   });
+  invalidateVoteCache(userId);
+  if (cachedBattlePage) {
+    cachedBattlePage = {
+      ...cachedBattlePage,
+      battles: cachedBattlePage.battles.map((battle) =>
+        battle.id === battleId
+          ? { ...battle, votesA: result.data.votesA, votesB: result.data.votesB }
+          : battle
+      ),
+    };
+  }
   return result.data;
 }
 
@@ -426,19 +500,29 @@ export async function getUserVote(
 async function fetchVotedBattleIds(
   userId: string,
   battleIds: string[]
-): Promise<Map<string, "A" | "B">> {
-  if (battleIds.length === 0) return new Map();
-  try {
+): Promise<VoteLoad> {
+  if (battleIds.length === 0) {
+    return { votedMap: new Map(), source: "cache", queryCount: 0 };
+  }
+  const cacheKey = `${userId}:${battleIds.join(",")}`;
+  const cached = voteCache.get(cacheKey);
+  if (cached && isFresh(cached.fetchedAt)) {
+    return { votedMap: cached.votedMap, source: "cache", queryCount: 0 };
+  }
+  const inFlight = voteLoadsInFlight.get(cacheKey);
+  if (inFlight) {
+    return { votedMap: await inFlight, source: "in-flight", queryCount: 0 };
+  }
+
+  const load = (async () => {
     const voteIds = battleIds.map((battleId) => `${battleId}_${userId}`);
     const batches: string[][] = [];
-    for (let index = 0; index < voteIds.length; index += 10) {
-      batches.push(voteIds.slice(index, index + 10));
+    for (let index = 0; index < voteIds.length; index += FIRESTORE_IN_LIMIT) {
+      batches.push(voteIds.slice(index, index + FIRESTORE_IN_LIMIT));
     }
     const snapshots = await Promise.all(
       batches.map((ids) =>
-        getDocs(
-          query(collection(db, "votes"), where(documentId(), "in", ids))
-        )
+        getDocs(query(collection(db, "votes"), where(documentId(), "in", ids)))
       )
     );
     const map = new Map<string, "A" | "B">();
@@ -448,23 +532,41 @@ async function fetchVotedBattleIds(
         map.set(v.battleId, v.side);
       })
     );
+    voteCache.set(cacheKey, { votedMap: map, fetchedAt: Date.now() });
     return map;
+  })();
+  voteLoadsInFlight.set(cacheKey, load);
+  try {
+    return {
+      votedMap: await load,
+      source: "network",
+      queryCount: Math.ceil(battleIds.length / FIRESTORE_IN_LIMIT),
+    };
   } catch {
     // Permission denied or collection missing — return empty map so battles load.
-    return new Map<string, "A" | "B">();
+    return { votedMap: new Map(), source: "network", queryCount: 1 };
+  } finally {
+    voteLoadsInFlight.delete(cacheKey);
   }
 }
 
 // ─── Hook: battles list ───────────────────────────────────────────────────────
 // `includeVotes` (default true): when false, skips the fetchVotedBattleIds
-// lookups (up to 3 `in` queries / 30 doc reads per fetch). Pass false from
+// lookup (one `in` query / up to 30 doc reads per network fetch). Pass false from
 // screens that never render or cast votes (profile battle-history lists) —
 // votedMap will stay empty there, which those screens already ignore.
+// `enabled` (default true): when false, the initial fetch is deferred until it
+// flips true — lets the Home feed mount the hook without querying Firestore
+// until the user actually opens the Battles discovery tab.
 
-export function useBattles(currentUserId: string | null, includeVotes = true) {
-  const [battles, setBattles] = useState<Battle[]>([]);
+export function useBattles(
+  currentUserId: string | null,
+  includeVotes = true,
+  enabled = true
+) {
+  const [battles, setBattles] = useState<Battle[]>(() => peekBattleCache() ?? []);
   const [votedMap, setVotedMap] = useState<Map<string, "A" | "B">>(new Map());
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => peekBattleCache() === null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Non-blocking warning shown when server-side stat finalization fails (e.g.
@@ -473,32 +575,45 @@ export function useBattles(currentUserId: string | null, includeVotes = true) {
   const [finalizeWarning, setFinalizeWarning] = useState<string | null>(null);
   const votedMapRef = useRef(votedMap);
   votedMapRef.current = votedMap;
+  const requestIdRef = useRef(0);
 
   const fetchBattles = useCallback(
-    async (isRefresh = false) => {
+    async (isRefresh = false, forceNetwork = false) => {
+      const requestId = ++requestIdRef.current;
       if (isRefresh) setRefreshing(true);
       else setLoading(true);
       setError(null);
       setFinalizeWarning(null);
+      const stopTimer = startDevMetricTimer("battles fetch", 700);
+      let queryCount = 0;
+      let returnedBattleCount = 0;
+      let source: BattlePageLoad["source"] = "network";
+      const trigger = isRefresh ? "background refresh" : "initial load";
+      let kind = "cold fetch";
 
       try {
-        const battlesSnap = await getDocs(
-          query(
-            collection(db, "battles"),
-            orderBy("createdAt", "desc"),
-            limit(BATTLES_PAGE_SIZE)
-          )
-        );
+        const page = await loadBattlePage(forceNetwork);
+        source = page.source;
+        queryCount += page.queryCount;
+        returnedBattleCount = page.battles.length;
+        if (page.source === "cache") kind = "cached fetch";
+        else if (page.source === "in-flight") kind = "deduplicated fetch";
+        let fetched = page.battles;
 
-        let fetched: Battle[] = battlesSnap.docs.map((d) =>
-          normalizeBattle(d.id, d.data() as Record<string, unknown>)
-        );
-        const voted = currentUserId && includeVotes
+        // Publish primary records immediately. Votes and finalization are
+        // secondary data and must not hold the page shell or cached rows.
+        if (requestId !== requestIdRef.current) return;
+        setBattles(fetched);
+        setLoading(false);
+
+        const voteLoad = currentUserId && includeVotes
           ? await fetchVotedBattleIds(
               currentUserId,
               fetched.map((battle) => battle.id)
             )
-          : new Map<string, "A" | "B">();
+          : { votedMap: new Map<string, "A" | "B">(), source: "cache" as const, queryCount: 0 };
+        queryCount += voteLoad.queryCount;
+        const voted = voteLoad.votedMap;
 
         // Finalization is a server call that requires an authenticated user.
         // Gate on the live Firebase Auth user (auth.currentUser), not just the
@@ -538,22 +653,28 @@ export function useBattles(currentUserId: string | null, includeVotes = true) {
         }
 
         if (finalizable.length > 0 && finalizeTokenReady) {
+          // Another mounted useBattles consumer may have reached this point
+          // while this hook awaited its token. Re-check the module guard now,
+          // then claim IDs synchronously before starting any callable.
+          const readyToFinalize = finalizable.filter(
+            (battle) => !sessionFinalizeGuard.has(battle.id)
+          );
           // Mark as attempted BEFORE awaiting so a concurrent/refocus fetch
           // can't fire the same finalize call in parallel. On an
           // `unauthenticated` (or any) failure the id stays in the guard, so we
           // stop retrying it until auth changes or a manual refresh.
-          finalizable.forEach((battle) =>
+          readyToFinalize.forEach((battle) =>
             sessionFinalizeGuard.add(battle.id)
           );
           const results = await Promise.allSettled(
-            finalizable.map((battle) => finalizeBattleStatsIfNeeded(battle.id))
+            readyToFinalize.map((battle) => finalizeBattleStatsIfNeeded(battle.id))
           );
 
           // Collect real failures. "failed-precondition" means the battle just
           // hasn't ended on the server clock yet — benign and transient, so it
           // is logged but never raised to the UI banner.
           const realFailures = results
-            .map((result, index) => ({ result, id: finalizable[index]?.id }))
+            .map((result, index) => ({ result, id: readyToFinalize[index]?.id }))
             .filter(
               (r): r is { result: PromiseRejectedResult; id: string } =>
                 r.result.status === "rejected" &&
@@ -569,10 +690,23 @@ export function useBattles(currentUserId: string | null, includeVotes = true) {
             );
           }
 
+          // Battle-result notifications — written once per participant by the
+          // first client whose finalize call actually transitioned the battle
+          // ("finalized", not "already_recorded"), with deterministic ids so
+          // concurrent finalizers can't duplicate. Fire-and-forget.
+          results.forEach((result, index) => {
+            if (
+              result.status === "fulfilled" &&
+              result.value.status === "finalized"
+            ) {
+              notifyBattleResults(readyToFinalize[index], result.value.winner);
+            }
+          });
+
           const finalizedById = new Map(
             results.flatMap((result, index) =>
               result.status === "fulfilled"
-                ? [[finalizable[index].id, result.value] as const]
+                ? [[readyToFinalize[index].id, result.value] as const]
                 : []
             )
           );
@@ -587,11 +721,16 @@ export function useBattles(currentUserId: string | null, includeVotes = true) {
                 }
               : battle;
           });
+          cachedBattlePage = cachedBattlePage
+            ? { ...cachedBattlePage, battles: fetched }
+            : cachedBattlePage;
         }
 
+        if (requestId !== requestIdRef.current) return;
         setBattles(fetched);
         setVotedMap(voted);
       } catch (err: unknown) {
+        if (requestId !== requestIdRef.current) return;
         // Only surfaces if the battles query itself fails (not votes).
         // On permission-denied or missing collection, show empty list.
         const code = (err as { code?: string })?.code ?? "";
@@ -601,16 +740,29 @@ export function useBattles(currentUserId: string | null, includeVotes = true) {
           setError(err instanceof Error ? err.message : "Failed to load battles");
         }
       } finally {
-        setLoading(false);
-        setRefreshing(false);
+        stopTimer({
+          kind,
+          trigger,
+          source,
+          queries: queryCount,
+          battles: returnedBattleCount,
+        });
+        if (requestId === requestIdRef.current) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       }
     },
     [currentUserId, includeVotes]
   );
 
   useEffect(() => {
-    fetchBattles();
-  }, [fetchBattles]);
+    if (!enabled) return;
+    void fetchBattles();
+    return () => {
+      requestIdRef.current += 1;
+    };
+  }, [fetchBattles, enabled]);
 
   // When the signed-in user changes (sign-in / sign-out / account switch) reset
   // the session finalize guard so battles can be legitimately re-attempted under
@@ -628,8 +780,6 @@ export function useBattles(currentUserId: string | null, includeVotes = true) {
         console.warn("[voteBattle] already voted — battleId:", battleId);
         return false;
       }
-
-      __DEV__ && console.log("[voteBattle] voting — battleId:", battleId, "side:", side, "userId:", currentUserId);
 
       // Optimistic update
       const nextVoted = new Map(votedMapRef.current);
@@ -661,7 +811,6 @@ export function useBattles(currentUserId: string | null, includeVotes = true) {
               : battle
           )
         );
-        __DEV__ && console.log("[voteBattle] success — battleId:", battleId, "side:", side);
         return true;
       } catch (err) {
         console.error("[voteBattle] error — reverting — battleId:", battleId, err);
@@ -694,7 +843,7 @@ export function useBattles(currentUserId: string | null, includeVotes = true) {
   // getting a new function reference each render and triggering a loop.
   // NOTE: this is what `useFocusEffect` uses, so it must NOT clear the finalize
   // guard — otherwise every tab focus would re-arm the finalize calls.
-  const refresh = useCallback(() => fetchBattles(true), [fetchBattles]);
+  const refresh = useCallback(() => fetchBattles(true, false), [fetchBattles]);
 
   // Explicit user-initiated refresh (pull-to-refresh / Retry). Unlike focus
   // refresh, this clears the session finalize guard first so a previously
@@ -702,7 +851,7 @@ export function useBattles(currentUserId: string | null, includeVotes = true) {
   // be retried on demand.
   const manualRefresh = useCallback(() => {
     clearFinalizeGuard();
-    return fetchBattles(true);
+    return fetchBattles(true, true);
   }, [fetchBattles]);
 
   return {

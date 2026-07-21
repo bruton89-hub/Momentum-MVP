@@ -12,7 +12,7 @@ import {
   ActivityIndicator,
   Platform,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
 import { useRouter } from "expo-router";
 import { Feather } from "@expo/vector-icons";
@@ -27,6 +27,7 @@ import {
   getNextVotableBattle,
 } from "@/hooks/useBattles";
 import { uploadMedia, createPost } from "@/hooks/usePosts";
+import { notifyChallengeAccepted } from "@/services/notificationRepository";
 import { fetchPostsByUser } from "@/services/postRepository";
 import { COLORS, SPACING, FONTS, RADIUS } from "@/constants/theme";
 import { openAthleteProfile } from "@/utils/navigation";
@@ -113,12 +114,15 @@ function AcceptModal({
   userId: string;
   profile: { username: string; avatar: string } | null;
 }) {
+  const insets = useSafeAreaInsets();
   const [myPosts, setMyPosts] = useState<Post[]>([]);
   const [loadingPosts, setLoadingPosts] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [selectedPostId, setSelectedPostId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadPct, setUploadPct] = useState(0);
+  const postsRequestRef = React.useRef(0);
+  const operationRef = React.useRef(false);
 
   const battleId = battle?.id ?? null;
   const challenger = battle?.playerA ?? null;
@@ -133,6 +137,7 @@ function AcceptModal({
   }, [battleId]);
 
   React.useEffect(() => {
+    const requestId = ++postsRequestRef.current;
     if (!visible || !userId) return;
     setLoadingPosts(true);
     // ── Query by all known userId field aliases ───────────────────────────────
@@ -141,19 +146,27 @@ function AcceptModal({
     // upload brand-new media below). `orderBy` is omitted to avoid requiring a
     // composite index; we sort the merged results newest-first client-side.
     fetchPostsByUser(userId)
-      .then(setMyPosts)
+      .then((posts) => {
+        if (requestId === postsRequestRef.current) setMyPosts(posts);
+      })
       .catch((err) => {
         console.error("[acceptModal] post query failed:", err);
-        setMyPosts([]);
+        if (requestId === postsRequestRef.current) setMyPosts([]);
       })
-      .finally(() => setLoadingPosts(false));
+      .finally(() => {
+        if (requestId === postsRequestRef.current) setLoadingPosts(false);
+      });
+    return () => {
+      postsRequestRef.current += 1;
+    };
   }, [visible, userId]);
 
   // ── Upload brand-new media to use for this battle ───────────────────────────
   // Mirrors the Create screen's pattern: pick → uploadMedia → createPost. The new
   // post is battle-enabled so it can be reused, then auto-selected as the pick.
   async function pickAndUpload() {
-    if (!profile || uploading || submitting) return;
+    if (!profile || operationRef.current) return;
+    operationRef.current = true;
     try {
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.All,
@@ -202,13 +215,15 @@ function AcceptModal({
       console.error("[acceptModal] upload failed:", err);
       Alert.alert("Upload failed", "Could not upload that media. Please try again.");
     } finally {
+      operationRef.current = false;
       setUploading(false);
       setUploadPct(0);
     }
   }
 
   async function confirmAccept() {
-    if (!battleId || !profile || !selectedPost) return;
+    if (!battleId || !profile || !selectedPost || operationRef.current) return;
+    operationRef.current = true;
     setSubmitting(true);
     const playerB: BattlePlayer = {
       userId,
@@ -220,11 +235,16 @@ function AcceptModal({
     };
     try {
       await acceptChallenge(battleId, playerB);
+      // Notify the challenger their open challenge was accepted (fire-and-
+      // forget, deduped per battle).
+      const challengerId = battle?.playerA?.userId || battle?.creatorId;
+      if (challengerId) notifyChallengeAccepted(challengerId, battleId);
       onAccepted();
       onClose();
     } catch {
       Alert.alert("Error", "Could not accept challenge. Try again.");
     } finally {
+      operationRef.current = false;
       setSubmitting(false);
     }
   }
@@ -234,7 +254,12 @@ function AcceptModal({
       <View style={modal.overlay}>
         <View style={modal.sheet}>
           <View style={modal.handle} />
-          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={modal.scrollBody}>
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            // SAFE AREA: sheet rests on the screen edge — Cancel must clear
+            // the home indicator.
+            contentContainerStyle={[modal.scrollBody, { paddingBottom: insets.bottom + SPACING.xl }]}
+          >
             <Text style={modal.title}>Accept Challenge</Text>
 
             {/* Challenger header */}
@@ -379,7 +404,7 @@ const modal = StyleSheet.create({
     paddingTop: SPACING.md,
     maxHeight: "92%",
   },
-  scrollBody: { paddingBottom: SPACING.xxxl },
+  scrollBody: {}, // paddingBottom applied inline — safe-area dependent.
   handle: {
     width: 40, height: 4, borderRadius: 2,
     backgroundColor: COLORS.inputBorder,
@@ -678,9 +703,14 @@ export default function BattlesScreen() {
   // Refresh battles when the tab gains focus (battles don't remount in tab nav)
   const refreshRef = React.useRef(refresh);
   refreshRef.current = refresh;
+  const hasFocusedRef = React.useRef(false);
   useFocusEffect(
     useCallback(() => {
-      refreshRef.current();
+      if (!hasFocusedRef.current) {
+        hasFocusedRef.current = true;
+        return;
+      }
+      void refreshRef.current();
     }, [])
   );
 
@@ -691,6 +721,18 @@ export default function BattlesScreen() {
   const votedMapRef = React.useRef(votedMap);
   votedMapRef.current = votedMap;
   const votingBattleRef = React.useRef<string | null>(null);
+  const advanceTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const advanceResolveRef = React.useRef<(() => void) | null>(null);
+  const mountedRef = React.useRef(true);
+  React.useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (advanceTimerRef.current) clearTimeout(advanceTimerRef.current);
+      advanceResolveRef.current?.();
+      advanceResolveRef.current = null;
+    };
+  }, []);
 
   // ── Filter logic using getBattleStatus ──────────────────────────────────────
   // Live:      active live battles first, then open challenges
@@ -844,7 +886,15 @@ export default function BattlesScreen() {
       }
 
       // Hold on voted state for 700 ms so user sees the result
-      await new Promise<void>((r) => setTimeout(r, 700));
+      await new Promise<void>((resolve) => {
+        advanceResolveRef.current = resolve;
+        advanceTimerRef.current = setTimeout(() => {
+          advanceResolveRef.current = null;
+          resolve();
+        }, 700);
+      });
+      advanceTimerRef.current = null;
+      if (!mountedRef.current) return;
 
       // Build the updated voted map (Firestore write may not have propagated yet)
       const updatedVotedMap = new Map(votedMapRef.current);
@@ -858,13 +908,8 @@ export default function BattlesScreen() {
       });
 
       if (next) {
-        __DEV__ && console.log("[battleVote] advancing to next battle —", {
-          battleId: next.id,
-          category: next.category,
-        });
         setDetailBattle(next);
       } else {
-        __DEV__ && console.log("[battleVote] all caught up — no more votable battles");
         setDetailBattle(null);
         Alert.alert("All caught up! 🎉", "You've voted on all available live battles.");
       }
@@ -884,13 +929,8 @@ export default function BattlesScreen() {
       });
 
       if (next) {
-        __DEV__ && console.log("[battleSkip] advancing to next battle —", {
-          battleId: next.id,
-          category: next.category,
-        });
         setDetailBattle(next);
       } else {
-        __DEV__ && console.log("[battleSkip] no more votable battles");
         setDetailBattle(null);
         Alert.alert("All caught up! 🎉", "No more votable battles right now.");
       }
@@ -981,6 +1021,7 @@ export default function BattlesScreen() {
         showsVerticalScrollIndicator={false}
         initialNumToRender={3}
         maxToRenderPerBatch={3}
+        updateCellsBatchingPeriod={50}
         windowSize={7}
         // NOTE: removeClippedSubviews is intentionally NOT set here. The live
         // tab's ListHeaderComponent contains an auto-playing <Video> and

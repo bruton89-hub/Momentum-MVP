@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import {
   View,
   Text,
@@ -39,13 +39,16 @@ export default function LoginScreen() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const submittingRef = useRef(false);
 
   async function handleLogin() {
+    if (submittingRef.current) return;
     const trimmed = email.trim().toLowerCase();
     if (!trimmed || !password) {
       setError("Email and password are required.");
       return;
     }
+    submittingRef.current = true;
     setLoading(true);
     setError("");
     try {
@@ -55,6 +58,7 @@ export default function LoginScreen() {
       const code = (err as { code?: string })?.code ?? "";
       setError(authErrorMessage(code));
     } finally {
+      submittingRef.current = false;
       setLoading(false);
     }
   }

@@ -11,6 +11,7 @@ import {
 import { ResizeMode, Video } from "expo-av";
 import { LinearGradient } from "expo-linear-gradient";
 import { useRouter } from "expo-router";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
 import Animated, {
   FadeIn,
@@ -137,6 +138,11 @@ function PostCard({
   const handleMediaError = useCallback(() => setMediaError(true), []);
   const pageHeight = height ?? SCREEN_H;
   const reducedMotion = useReducedMotion();
+  const insets = useSafeAreaInsets();
+  // SAFE AREA: the card starts at the physical screen top on the Home feed,
+  // with the overlay header (~84pt) below the top inset. A fixed offset
+  // underlapped the header on Dynamic Island devices (59 + 84 > 118).
+  const muteBadgeTop = insets.top + 96;
 
   // ── Micro-animation shared values (all UI-thread) ───────────────────────────
   const heartScale = useSharedValue(0);      // double-tap heart burst
@@ -737,7 +743,7 @@ function PostCard({
         <Animated.View
           entering={reducedMotion ? undefined : FadeIn.duration(200)}
           exiting={reducedMotion ? undefined : FadeOut.duration(200)}
-          style={styles.muteBadge}
+          style={[styles.muteBadge, { top: muteBadgeTop }]}
           accessible
           accessibilityLabel={isMuted ? "Muted" : "Sound on"}
         >
@@ -999,7 +1005,7 @@ const styles = StyleSheet.create({
   // ── Floating elements over media ─────────────────────────────────────────────
   muteBadge: {
     position: "absolute",
-    top: 118,
+    // top applied inline — safe-area dependent.
     right: SPACING.md,
     width: 28,
     height: 28,

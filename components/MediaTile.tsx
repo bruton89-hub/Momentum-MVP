@@ -133,20 +133,6 @@ export default function MediaTile({
     };
   }, [isWeb, isVideo, isUrlValid, normalizedUri]);
 
-  // ── Native prefetch diagnostic (DEV only, images only) ───────────────────────
-  // PERF: this was documented as a DEV diagnostic but ran unconditionally,
-  // issuing a duplicate native image download alongside <Image>'s own load for
-  // every image tile in production. Now actually gated to DEV.
-  useEffect(() => {
-    if (!__DEV__) return;
-    // Only prefetch for valid image URLs — never for videos or invalid URLs.
-    // Prefetching .mp4 URLs causes "Error decoding image data" on iOS.
-    if (!normalizedUri || isVideo || !isUrlValid) return;
-
-    Image.prefetch(normalizedUri).catch(() => undefined);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [normalizedUri, isVideo, isUrlValid]);
-
   function handleError() {
     setError(true);
   }

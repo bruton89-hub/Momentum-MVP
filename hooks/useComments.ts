@@ -33,6 +33,18 @@ export function useComments(postId: string | null, enabled: boolean) {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const requestIdRef = useRef(0);
   const submittingRef = useRef(false);
+  const deletingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const postIdRef = useRef(postId);
+  postIdRef.current = postId;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      requestIdRef.current += 1;
+    };
+  }, []);
 
   const load = useCallback(async () => {
     if (!postId) return;
@@ -72,9 +84,10 @@ export function useComments(postId: string | null, enabled: boolean) {
   }, [enabled, postId, loaded, load]);
 
   const submit = useCallback(
-    async (text: string, author: CommentAuthor): Promise<boolean> => {
+    async (text: string, author: CommentAuthor): Promise<PostComment | null> => {
       const trimmed = text.trim();
-      if (!postId || !trimmed || submittingRef.current) return false;
+      if (!postId || !trimmed || submittingRef.current) return null;
+      const operationPostId = postId;
       submittingRef.current = true;
       setSubmitting(true);
       setSubmitError(null);
@@ -86,36 +99,49 @@ export function useComments(postId: string | null, enabled: boolean) {
           avatar: author.avatar,
           text: trimmed,
         });
+        if (!mountedRef.current || postIdRef.current !== operationPostId) return null;
         // Insert the server-accepted comment, deduped by id.
         setComments((prev) =>
           prev.some((c) => c.id === accepted.id)
             ? prev
             : [accepted, ...prev]
         );
-        return true;
+        return accepted;
       } catch (err) {
-        setSubmitError(
-          err instanceof Error ? err.message : "Couldn't post your comment."
-        );
-        return false;
+        if (mountedRef.current && postIdRef.current === operationPostId) {
+          setSubmitError(
+            err instanceof Error ? err.message : "Couldn't post your comment."
+          );
+        }
+        return null;
       } finally {
         submittingRef.current = false;
-        setSubmitting(false);
+        if (mountedRef.current && postIdRef.current === operationPostId) {
+          setSubmitting(false);
+        }
       }
     },
     [postId]
   );
 
   const remove = useCallback(async (commentId: string): Promise<boolean> => {
+    if (deletingRef.current) return false;
+    deletingRef.current = true;
+    const operationPostId = postIdRef.current;
     setDeletingId(commentId);
     try {
       await deleteComment(commentId);
-      setComments((prev) => prev.filter((c) => c.id !== commentId));
+      if (mountedRef.current && postIdRef.current === operationPostId) {
+        setComments((prev) => prev.filter((c) => c.id !== commentId));
+      }
       return true;
     } catch {
       return false;
     } finally {
-      setDeletingId(null);
+      deletingRef.current = false;
+      if (mountedRef.current && postIdRef.current === operationPostId) {
+        setDeletingId(null);
+      }
     }
   }, []);
 

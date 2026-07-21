@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import {
   collection,
   doc,
@@ -15,6 +15,7 @@ import type { FieldValue, Timestamp } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { Platform } from "react-native";
 import { db, storage } from "@/config/firebase";
+import { startDevTimer } from "@/utils/performance";
 import type { UserProfile } from "@/types";
 
 const MAX_AVATAR_BYTES = 10 * 1024 * 1024;
@@ -223,8 +224,10 @@ export function useProfile(userId: string | null) {
   // of flashing "Athlete not found" for one frame before the fetch begins.
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestIdRef = useRef(0);
 
   const load = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
     if (!userId) {
       // No userId — clear state and stop loading immediately
       setProfile(null);
@@ -234,13 +237,17 @@ export function useProfile(userId: string | null) {
     }
     setLoading(true);
     setError(null);
+    const stopTimer = startDevTimer(`profile ${userId}`);
     try {
       const p = await fetchUserProfile(userId);
-      setProfile(p);
+      if (requestId === requestIdRef.current) setProfile(p);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load profile");
+      if (requestId === requestIdRef.current) {
+        setError(err instanceof Error ? err.message : "Failed to load profile");
+      }
     } finally {
-      setLoading(false);
+      stopTimer();
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }, [userId]);
 
@@ -248,7 +255,10 @@ export function useProfile(userId: string | null) {
   // Previously this hook had no useEffect, so it never fetched — the player
   // profile page would always show "Athlete not found" immediately.
   useEffect(() => {
-    load();
+    void load();
+    return () => {
+      requestIdRef.current += 1;
+    };
   }, [load]);
 
   return { profile, loading, error, load };

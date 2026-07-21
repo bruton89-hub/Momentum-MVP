@@ -90,7 +90,8 @@ function ProfileIcon({ focused }: { focused: boolean }) {
 
 export default function TabsLayout() {
   const insets = useSafeAreaInsets();
-  const { userId, isLoading } = useAuthStore();
+  const userId = useAuthStore((state) => state.userId);
+  const isLoading = useAuthStore((state) => state.isLoading);
 
   if (isLoading) return null;
   if (!userId) return <Redirect href="/login" />;

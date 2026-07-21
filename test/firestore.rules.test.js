@@ -9,11 +9,16 @@ const {
   assertSucceeds,
 } = require("@firebase/rules-unit-testing");
 const {
+  collection,
   doc,
+  getCountFromServer,
   getDoc,
+  getDocs,
+  query,
   setDoc,
   updateDoc,
   deleteDoc,
+  where,
 } = require("firebase/firestore");
 
 const root = path.resolve(__dirname, "..");
@@ -99,6 +104,66 @@ const openBattle = {
   winner: null,
   statsRecorded: false,
 };
+
+const unreadNotification = {
+  type: "follow",
+  recipientId: "user-a",
+  actorId: "user-b",
+  subjectUsername: "athlete-b",
+  subjectAvatar: "",
+  read: false,
+};
+
+test("current rules allow recipients to list and count only their notifications", async () => {
+  await seed(current, [
+    ["notifications/notification-a", unreadNotification],
+    ["notifications/notification-b", {
+      ...unreadNotification,
+      recipientId: "user-b",
+      actorId: "user-a",
+    }],
+  ]);
+  const db = authenticatedDb(current, "user-a");
+  const ownUnread = query(
+    collection(db, "notifications"),
+    where("recipientId", "==", "user-a"),
+    where("read", "==", false)
+  );
+
+  await assertSucceeds(getDocs(ownUnread));
+  const aggregate = await assertSucceeds(getCountFromServer(ownUnread));
+  if (aggregate.data().count !== 1) {
+    throw new Error(`expected one unread notification, got ${aggregate.data().count}`);
+  }
+});
+
+test("current rules deny notification list/count queries for another recipient", async () => {
+  await seed(current, [["notifications/notification-b", {
+    ...unreadNotification,
+    recipientId: "user-b",
+  }]]);
+  const db = authenticatedDb(current, "user-a");
+  const anotherUsersUnread = query(
+    collection(db, "notifications"),
+    where("recipientId", "==", "user-b"),
+    where("read", "==", false)
+  );
+
+  await assertFails(getDocs(anotherUsersUnread));
+  await assertFails(getCountFromServer(anotherUsersUnread));
+});
+
+test("current rules deny unscoped notification list/count queries", async () => {
+  await seed(current, [["notifications/notification-a", unreadNotification]]);
+  const db = authenticatedDb(current, "user-a");
+  const unscopedUnread = query(
+    collection(db, "notifications"),
+    where("read", "==", false)
+  );
+
+  await assertFails(getDocs(unscopedUnread));
+  await assertFails(getCountFromServer(unscopedUnread));
+});
 
 test("current rules require authentication for reads", async () => {
   await seed(current, [["posts/post-a", post]]);

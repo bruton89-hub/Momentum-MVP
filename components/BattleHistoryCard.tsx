@@ -1,4 +1,4 @@
-import React from "react";
+import React, { memo } from "react";
 import { View, Text, Pressable, StyleSheet } from "react-native";
 import { useRouter } from "expo-router";
 import { COLORS, SPACING, RADIUS, FONTS, TYPE, HIT_SLOP } from "@/constants/theme";
@@ -20,7 +20,7 @@ interface Props {
  * Win/loss battle history row — shared by both profile screens
  * (previously duplicated, styles and all, in each).
  */
-export default function BattleHistoryCard({
+function BattleHistoryCard({
   battle,
   userId,
   currentUserId,
@@ -82,6 +82,8 @@ export default function BattleHistoryCard({
     </View>
   );
 }
+
+export default memo(BattleHistoryCard);
 
 const styles = StyleSheet.create({
   card: {

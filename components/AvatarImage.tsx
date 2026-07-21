@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { memo, useEffect, useMemo, useState } from "react";
 import { Image, View, Text, StyleSheet } from "react-native";
 import { COLORS, RADIUS } from "@/constants/theme";
 
@@ -8,7 +8,7 @@ interface Props {
   size?: number;
 }
 
-export default function AvatarImage({ uri, username = "?", size = 40 }: Props) {
+function AvatarImage({ uri, username = "?", size = 40 }: Props) {
   const [failed, setFailed] = useState(false);
 
   const initial = (username?.[0] ?? "?").toUpperCase();
@@ -16,6 +16,11 @@ export default function AvatarImage({ uri, username = "?", size = 40 }: Props) {
   useEffect(() => {
     setFailed(false);
   }, [uri]);
+
+  const imageStyle = useMemo(
+    () => ({ width: size, height: size, borderRadius: size / 2 }),
+    [size]
+  );
 
   if (!uri || failed) {
     return (
@@ -36,13 +41,15 @@ export default function AvatarImage({ uri, username = "?", size = 40 }: Props) {
     <Image
       source={{ uri }}
       accessibilityLabel={`${username}'s avatar`}
-      style={{ width: size, height: size, borderRadius: size / 2 }}
+      style={imageStyle}
       onError={() => {
         setFailed(true);
       }}
     />
   );
 }
+
+export default memo(AvatarImage);
 
 const styles = StyleSheet.create({
   fallback: {

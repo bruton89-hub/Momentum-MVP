@@ -1,4 +1,4 @@
-import React from "react";
+import React, { memo, useCallback } from "react";
 import { View, Text, Pressable, StyleSheet, Dimensions } from "react-native";
 import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
 import { COLORS, SPACING, RADIUS, FONTS } from "@/constants/theme";
@@ -11,7 +11,7 @@ const CELL = (SCREEN_W - SPACING.lg * 2 - SPACING.sm * 2) / 3;
 
 interface Props {
   post: Post;
-  onPress: () => void;
+  onPress: (post: Post) => void;
   /** Diagnostic label passed through to MediaTile logs. */
   context?: string;
   /** Dim the tile once the viewer has already opened it (caller-provided). */
@@ -30,12 +30,13 @@ function formatCount(n: number): string {
  * and player-profile screens. Indicators (video, battle, pinned, likes) render
  * only from real post data.
  */
-export default function PostGridThumb({
+function PostGridThumb({
   post,
   onPress,
   context = "ProfileGrid",
   viewed = false,
 }: Props) {
+  const handlePress = useCallback(() => onPress(post), [onPress, post]);
   const indicatorParts = [
     post.mediaType === "video" ? "video" : "photo",
     post.pinned ? "pinned" : null,
@@ -44,7 +45,7 @@ export default function PostGridThumb({
 
   return (
     <Pressable
-      onPress={onPress}
+      onPress={handlePress}
       accessibilityRole="imagebutton"
       accessibilityLabel={
         post.caption
@@ -95,6 +96,8 @@ export default function PostGridThumb({
     </Pressable>
   );
 }
+
+export default memo(PostGridThumb);
 
 const styles = StyleSheet.create({
   wrap: { position: "relative" },

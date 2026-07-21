@@ -24,6 +24,7 @@ import {
 } from "@/services/postRepository";
 import type { Post } from "@/types";
 import type { PostVideoEdit } from "@/constants/videoEditing";
+import { startDevTimer } from "@/utils/performance";
 
 const POSTS_PER_PAGE = 20;
 const DISCOVERY_INITIAL_LIMIT = 24;
@@ -616,24 +617,34 @@ export function usePosts(
 export function useUserPosts(userId: string | null) {
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(false);
+  const requestIdRef = useRef(0);
 
   const load = useCallback(async () => {
-    if (!userId) { setPosts([]); return; }
+    const requestId = ++requestIdRef.current;
+    if (!userId) {
+      setPosts([]);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
+    const stopTimer = startDevTimer(`posts for user ${userId}`);
     try {
       const normalized = await fetchPostsByUser(userId);
-      __DEV__ && console.log("[fetchUserPosts] userId:", userId, "→ kept:", normalized.length);
-      setPosts(normalized);
+      if (requestId === requestIdRef.current) setPosts(normalized);
     } catch (err) {
       console.error("[fetchUserPosts] query failed:", err);
-      setPosts([]);
+      if (requestId === requestIdRef.current) setPosts([]);
     } finally {
-      setLoading(false);
+      stopTimer();
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }, [userId]);
 
   useEffect(() => {
-    load();
+    void load();
+    return () => {
+      requestIdRef.current += 1;
+    };
   }, [load]);
 
   return { posts, loading, refresh: load };

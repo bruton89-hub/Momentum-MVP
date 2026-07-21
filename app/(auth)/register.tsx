@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import {
   View,
   Text,
@@ -48,6 +48,7 @@ export default function RegisterScreen() {
   const [bio, setBio] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const submittingRef = useRef(false);
 
   async function handleCredentials() {
     const trimmedEmail = email.trim().toLowerCase();
@@ -72,6 +73,7 @@ export default function RegisterScreen() {
   }
 
   async function handleSignUp() {
+    if (submittingRef.current) return;
     const trimmedEmail = email.trim().toLowerCase();
     const trimmedUser = username.trim();
 
@@ -80,6 +82,7 @@ export default function RegisterScreen() {
       return;
     }
 
+    submittingRef.current = true;
     setLoading(true);
     setError("");
     try {
@@ -105,6 +108,7 @@ export default function RegisterScreen() {
       setError(authErrorMessage(code));
       setStep("credentials");
     } finally {
+      submittingRef.current = false;
       setLoading(false);
     }
   }

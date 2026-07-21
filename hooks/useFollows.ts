@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import {
   collection,
   query,
@@ -10,6 +10,7 @@ import {
   serverTimestamp,
 } from "firebase/firestore";
 import { db } from "@/config/firebase";
+import { notifyFollow } from "@/services/notificationRepository";
 
 // ─── Document ID convention ───────────────────────────────────────────────────
 // follows/{followerId}_{followingId}
@@ -34,7 +35,6 @@ export async function fetchFollowedIds(userId: string): Promise<Set<string>> {
       const followingId = (d.data() as { followingId: string }).followingId;
       if (followingId) ids.add(followingId);
     });
-    __DEV__ && console.log("[fetchFollowedIds] loaded", ids.size, "followed ids for", userId);
     return ids;
   } catch (err) {
     // Permission denied fires here if firestore.rules has no `follows` rule.
@@ -51,8 +51,13 @@ export async function fetchFollowedIds(userId: string): Promise<Set<string>> {
 export function useFollows(currentUserId: string | null) {
   const [followedIds, setFollowedIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
+  const requestIdRef = useRef(0);
+  const pendingTargetsRef = useRef(new Set<string>());
+  const ownerRef = useRef(currentUserId);
+  ownerRef.current = currentUserId;
 
   const load = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
     if (!currentUserId) {
       setFollowedIds(new Set());
       setLoading(false);
@@ -60,12 +65,18 @@ export function useFollows(currentUserId: string | null) {
     }
     setLoading(true);
     const ids = await fetchFollowedIds(currentUserId);
-    setFollowedIds(ids);
-    setLoading(false);
+    if (requestId === requestIdRef.current) {
+      setFollowedIds(ids);
+      setLoading(false);
+    }
   }, [currentUserId]);
 
   useEffect(() => {
-    load();
+    void load();
+    return () => {
+      requestIdRef.current += 1;
+      pendingTargetsRef.current.clear();
+    };
   }, [load]);
 
   // Follow a user — optimistic update, revert on failure
@@ -73,11 +84,10 @@ export function useFollows(currentUserId: string | null) {
     async (targetUserId: string) => {
       // Guard: need both IDs, cannot follow self, cannot follow empty string
       if (!currentUserId || !targetUserId || currentUserId === targetUserId) return;
+      if (pendingTargetsRef.current.has(targetUserId)) return;
+      pendingTargetsRef.current.add(targetUserId);
 
       const docId = followDocId(currentUserId, targetUserId);
-      __DEV__ && console.log("[follow] currentUserId:", currentUserId);
-      __DEV__ && console.log("[follow] targetUserId:", targetUserId);
-      __DEV__ && console.log("[follow] docId:", docId);
 
       // Optimistic: add immediately so UI reflects intent before Firestore confirms
       setFollowedIds((prev) => new Set([...prev, targetUserId]));
@@ -91,16 +101,22 @@ export function useFollows(currentUserId: string | null) {
             createdAt: serverTimestamp(),
           }
         );
-        __DEV__ && console.log("[follow] create success — docId:", docId);
+        // Fire-and-forget; deterministic id (follow_{follower}_{followed})
+        // means re-follows can never duplicate the notification.
+        notifyFollow(targetUserId);
       } catch (err) {
         const code = (err as { code?: string })?.code ?? "unknown";
         console.error("[follow] FAILED — code:", code, "error:", err);
         // Revert optimistic update so UI accurately shows the true state
-        setFollowedIds((prev) => {
-          const next = new Set(prev);
-          next.delete(targetUserId);
-          return next;
-        });
+        if (ownerRef.current === currentUserId) {
+          setFollowedIds((prev) => {
+            const next = new Set(prev);
+            next.delete(targetUserId);
+            return next;
+          });
+        }
+      } finally {
+        pendingTargetsRef.current.delete(targetUserId);
       }
     },
     [currentUserId]
@@ -110,11 +126,10 @@ export function useFollows(currentUserId: string | null) {
   const unfollow = useCallback(
     async (targetUserId: string) => {
       if (!currentUserId || !targetUserId) return;
+      if (pendingTargetsRef.current.has(targetUserId)) return;
+      pendingTargetsRef.current.add(targetUserId);
 
       const docId = followDocId(currentUserId, targetUserId);
-      __DEV__ && console.log("[unfollow] currentUserId:", currentUserId);
-      __DEV__ && console.log("[unfollow] targetUserId:", targetUserId);
-      __DEV__ && console.log("[unfollow] docId:", docId);
 
       // Optimistic: remove immediately
       setFollowedIds((prev) => {
@@ -127,12 +142,15 @@ export function useFollows(currentUserId: string | null) {
         await deleteDoc(
           doc(db, "follows", docId)
         );
-        __DEV__ && console.log("[unfollow] delete success — docId:", docId);
       } catch (err) {
         const code = (err as { code?: string })?.code ?? "unknown";
         console.error("[unfollow] FAILED — code:", code, "error:", err);
         // Revert optimistic update
-        setFollowedIds((prev) => new Set([...prev, targetUserId]));
+        if (ownerRef.current === currentUserId) {
+          setFollowedIds((prev) => new Set([...prev, targetUserId]));
+        }
+      } finally {
+        pendingTargetsRef.current.delete(targetUserId);
       }
     },
     [currentUserId]

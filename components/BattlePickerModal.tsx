@@ -8,7 +8,7 @@
  *   playerB = current user (the challenger)
  *   status  = "live"   (open → accepted in one operation)
  */
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Modal,
   View,
@@ -20,7 +20,9 @@ import {
   Alert,
 } from "react-native";
 import { Feather } from "@expo/vector-icons";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { createLiveBattle } from "@/hooks/useBattles";
+import { notifyChallengeReceived } from "@/services/notificationRepository";
 import { fetchPostsByUser } from "@/services/postRepository";
 import { COLORS, SPACING, RADIUS, FONTS, TYPE } from "@/constants/theme";
 import AvatarImage from "./AvatarImage";
@@ -100,10 +102,13 @@ export default function BattlePickerModal({
   onClose,
   onBattleCreated,
 }: Props) {
+  const insets = useSafeAreaInsets();
   const [myPosts, setMyPosts] = useState<Post[]>([]);
   const [loadingPosts, setLoadingPosts] = useState(false);
   const [creating, setCreating] = useState(false);
   const [selectedPostId, setSelectedPostId] = useState<string | null>(null);
+  const postsRequestRef = useRef(0);
+  const creatingRef = useRef(false);
 
   // ── Load the current user's posts whenever the modal opens ──────────────────
   // Root-cause note:
@@ -116,37 +121,33 @@ export default function BattlePickerModal({
   //   in parallel, deduplicate by doc ID, and sort newest-first client-side.
   //   This mirrors the same pattern used in useFollowingPosts and useUserPosts.
   useEffect(() => {
+    const requestId = ++postsRequestRef.current;
     if (!visible || !currentUserId) return;
     setSelectedPostId(null);
     setLoadingPosts(true);
 
-    __DEV__ && console.log("[challengePicker] currentUserId:", currentUserId);
-
     fetchPostsByUser(currentUserId)
       .then((eligible) => {
-        __DEV__ && console.log("[challengePicker] eligible posts:", eligible.length,
-          eligible.map((p) => ({ id: p.id, mediaType: p.mediaType, caption: p.caption })));
-
-        setMyPosts(eligible);
+        if (requestId === postsRequestRef.current) setMyPosts(eligible);
       })
       .catch((err) => {
         // Log the real error so FAILED_PRECONDITION (missing index) or
         // PERMISSION_DENIED is visible in Metro, not silently hidden.
         console.error("[challengePicker] query failed:", err);
-        setMyPosts([]);
+        if (requestId === postsRequestRef.current) setMyPosts([]);
       })
-      .finally(() => setLoadingPosts(false));
+      .finally(() => {
+        if (requestId === postsRequestRef.current) setLoadingPosts(false);
+      });
+    return () => {
+      postsRequestRef.current += 1;
+    };
   }, [visible, currentUserId]);
 
   // ── Create the live battle ──────────────────────────────────────────────────
   async function handlePickPost(myPost: Post) {
-    if (!targetPost || !currentProfile || creating) return;
-    __DEV__ && console.log("[challengePicker] selected post:", {
-      id:        myPost.id,
-      mediaType: myPost.mediaType,
-      mediaUrl:  myPost.mediaUrl ? myPost.mediaUrl.slice(0, 60) + "…" : "MISSING",
-      caption:   myPost.caption,
-    });
+    if (!targetPost || !currentProfile || creatingRef.current) return;
+    creatingRef.current = true;
     setSelectedPostId(myPost.id);
     setCreating(true);
 
@@ -176,13 +177,16 @@ export default function BattlePickerModal({
       // create-open-then-accept path was rejected by Firestore rules (a creator
       // may not accept their own challenge). A one-shot live create conforms to
       // the rules and leaves no orphaned open battle.
-      await createLiveBattle({
+      const battleId = await createLiveBattle({
         creatorId:     currentUserId,
         playerA,
         playerB,
         category:      "Highlights",
         durationHours: 24,
       });
+
+      // Notify the challenged athlete (fire-and-forget, deduped per battle).
+      notifyChallengeReceived(targetPost.userId, battleId);
 
       onBattleCreated();
       onClose();
@@ -194,6 +198,7 @@ export default function BattlePickerModal({
       Alert.alert("Failed", "Could not create battle. Please try again.");
       setSelectedPostId(null);
     } finally {
+      creatingRef.current = false;
       setCreating(false);
     }
   }
@@ -211,7 +216,8 @@ export default function BattlePickerModal({
       <View style={styles.overlay}>
         <Pressable style={styles.backdrop} onPress={onClose} />
 
-        <View style={styles.sheet}>
+        {/* SAFE AREA: Cancel sits at the sheet bottom on the screen edge. */}
+        <View style={[styles.sheet, { paddingBottom: insets.bottom + SPACING.xl }]}>
           {/* Handle */}
           <View style={styles.handle} />
 
@@ -310,7 +316,7 @@ const styles = StyleSheet.create({
     borderTopRightRadius: RADIUS.xl,
     paddingTop: SPACING.sm,
     paddingHorizontal: SPACING.xl,
-    paddingBottom: SPACING.xxxl,
+    // paddingBottom applied inline — safe-area dependent.
   },
   handle: {
     width: 40,

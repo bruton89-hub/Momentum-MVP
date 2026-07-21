@@ -9,10 +9,13 @@ import { auth } from "@/config/firebase";
 import { useAuthStore } from "@/store/authStore";
 import { fetchUserProfile } from "@/hooks/useProfile";
 
-SplashScreen.preventAutoHideAsync();
+void SplashScreen.preventAutoHideAsync().catch(() => undefined);
 
 export default function RootLayout() {
-  const { setUserId, setProfile, setLoading, isLoading } = useAuthStore();
+  const setUserId = useAuthStore((state) => state.setUserId);
+  const setProfile = useAuthStore((state) => state.setProfile);
+  const setLoading = useAuthStore((state) => state.setLoading);
+  const isLoading = useAuthStore((state) => state.isLoading);
 
   // ── Firebase auth listener ─────────────────────────────────────────────────
   useEffect(() => {

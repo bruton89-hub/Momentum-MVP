@@ -88,6 +88,30 @@ service cloud.firestore {
       allow create, update, delete: if false;
     }
 
+    // ─── Notifications ─────────────────────────────────────────────────────────
+    // Deterministic doc IDs (per action) prevent duplicates: a second write to
+    // an existing id is an UPDATE, which only the recipient may perform and
+    // only to flip `read` — so repeat actions cannot re-create or spam.
+    match /notifications/{notificationId} {
+      allow read: if isSignedIn()
+        && resource.data.recipientId == request.auth.uid;
+      allow create: if isSignedIn()
+        && request.resource.data.actorId == request.auth.uid
+        && request.resource.data.recipientId is string
+        && request.resource.data.recipientId != request.auth.uid
+        && request.resource.data.read == false
+        && request.resource.data.type in [
+          'follow', 'comment', 'challenge_received', 'challenge_accepted',
+          'battle_completed', 'battle_won'
+        ];
+      // Recipient may mark read (one-way).
+      allow update: if isSignedIn()
+        && resource.data.recipientId == request.auth.uid
+        && changedKeys().hasOnly(['read'])
+        && request.resource.data.read == true;
+      // No deletes in v1.
+    }
+
     // ─── Comments ──────────────────────────────────────────────────────────────
     // Flat, post-scoped comments (no replies, no edits).
     // Fields: postId, userId, username, avatar, text, createdAt

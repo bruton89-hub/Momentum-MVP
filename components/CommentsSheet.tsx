@@ -26,12 +26,14 @@ import Animated, {
   Easing,
   cancelAnimation,
 } from "react-native-reanimated";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { COLORS, SPACING, RADIUS, FONTS, TYPE, HIT_SLOP } from "@/constants/theme";
 import AvatarImage from "./AvatarImage";
 import IconButton from "./IconButton";
 import { useAuthStore } from "@/store/authStore";
 import { useComments } from "@/hooks/useComments";
 import { MAX_COMMENT_LENGTH } from "@/services/commentRepository";
+import { notifyComment } from "@/services/notificationRepository";
 import { toHandle, formatRelativeTime } from "@/utils/format";
 import type { Post, PostComment } from "@/types";
 
@@ -144,6 +146,7 @@ export default function CommentsSheet({
   onClose,
 }: Props) {
   const profile = useAuthStore((s) => s.profile);
+  const insets = useSafeAreaInsets();
   const reducedMotion = useReducedMotion();
   const postId = post?.id ?? null;
   const {
@@ -171,15 +174,20 @@ export default function CommentsSheet({
   const canSend = canComment && draft.trim().length > 0 && !submitting;
 
   const handleSend = useCallback(async () => {
-    if (!canSend || !currentUserId || !profile) return;
-    const ok = await submit(draft, {
+    if (!canSend || !currentUserId || !profile || !post) return;
+    const accepted = await submit(draft, {
       userId: currentUserId,
       username: profile.username,
       avatar: profile.avatarUrl || profile.avatar,
     });
     // Clear ONLY after the backend accepted the comment.
-    if (ok) setDraft("");
-  }, [canSend, currentUserId, profile, submit, draft]);
+    if (accepted) {
+      setDraft("");
+      // Notify the post owner (skipped automatically for self-comments);
+      // keyed on the comment id so it can never duplicate.
+      notifyComment(post.userId, post.id, accepted.id, accepted.text);
+    }
+  }, [canSend, currentUserId, profile, post, submit, draft]);
 
   // Web: Enter sends, Shift+Enter inserts a newline.
   const handleKeyPress = useCallback(
@@ -249,7 +257,9 @@ export default function CommentsSheet({
           style={styles.kav}
           pointerEvents="box-none"
         >
-          <View style={styles.sheet}>
+          {/* SAFE AREA: the sheet sits on the screen edge — the composer must
+              clear the home indicator when the keyboard is closed. */}
+          <View style={[styles.sheet, { paddingBottom: SPACING.lg + insets.bottom }]}>
             <View style={styles.handle} />
 
             {/* Header — real count only once loaded */}
@@ -305,6 +315,8 @@ export default function CommentsSheet({
                 keyboardShouldPersistTaps="handled"
                 showsVerticalScrollIndicator={false}
                 initialNumToRender={12}
+                maxToRenderPerBatch={8}
+                updateCellsBatchingPeriod={50}
                 windowSize={7}
               />
             )}
@@ -377,7 +389,7 @@ const styles = StyleSheet.create({
     borderTopRightRadius: RADIUS.xl,
     maxHeight: 560,
     minHeight: 320,
-    paddingBottom: SPACING.lg,
+    // paddingBottom applied inline: SPACING.lg + safe-area bottom inset.
   },
   handle: {
     width: 40,

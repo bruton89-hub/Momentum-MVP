@@ -1,7 +1,7 @@
 import React, { useCallback, useMemo, useState } from "react";
 import { View, StyleSheet, Alert, Platform } from "react-native";
 import { useLocalSearchParams, useRouter, Redirect } from "expo-router";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import Animated, {
   useSharedValue,
   useAnimatedScrollHandler,
@@ -34,25 +34,35 @@ const PROFILE_TABS: readonly ProfileTabDef<ProfileTab>[] = [
   { key: "battles", label: "Battles", icon: "zap" },
   { key: "saved", label: "Saved", icon: "bookmark" },
 ];
+const profileItemKey = (item: Post | Battle) => item.id;
 
 // ─── Player Profile Screen ────────────────────────────────────────────────────
 export default function PlayerProfileScreen() {
   const { userId: routeUserId } = useLocalSearchParams<{ userId: string }>();
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const currentUserId = useAuthStore((s) => s.userId);
   const currentProfile = useAuthStore((s) => s.profile);
+  const authLoading = useAuthStore((s) => s.isLoading);
 
   // If viewing own profile, show own data (edit still available)
   const targetUserId = routeUserId ?? null;
   const isSelf = !!targetUserId && targetUserId === currentUserId;
+  const queryUserId = authLoading || isSelf ? null : targetUserId;
 
-  const { profile, loading: profileLoading, error: profileError } = useProfile(targetUserId);
-  const { posts, loading: postsLoading } = useUserPosts(targetUserId);
+  const { profile, loading: profileLoading, error: profileError } = useProfile(queryUserId);
+  const { posts, loading: postsLoading } = useUserPosts(queryUserId);
   // includeVotes=false: this screen only renders battle history rows and never
   // shows or casts votes, so skip the votedMap lookups (3 Firestore `in`
   // queries per visit). The battles list itself is user-independent.
-  const { battles, loading: battlesLoading } = useBattles(currentUserId, false);
-  const { followedIds, follow, unfollow } = useFollows(currentUserId);
+  const { battles, loading: battlesLoading } = useBattles(
+    currentUserId,
+    false,
+    !authLoading && !isSelf
+  );
+  const { followedIds, follow, unfollow } = useFollows(
+    authLoading || isSelf ? null : currentUserId
+  );
 
   const [activeTab, setActiveTab] = useState<ProfileTab>("posts");
   const [selectedPost, setSelectedPost] = useState<Post | null>(null);
@@ -108,16 +118,16 @@ export default function PlayerProfileScreen() {
     else follow(targetUserId);
   }, [targetUserId, currentUserId, isFollowing, follow, unfollow]);
 
-  function handleFollow(targetId: string, isCurrentlyFollowing: boolean) {
+  const handleFollow = useCallback((targetId: string, isCurrentlyFollowing: boolean) => {
     if (!currentUserId) return;
     if (isCurrentlyFollowing) unfollow(targetId);
     else follow(targetId);
-  }
+  }, [currentUserId, follow, unfollow]);
 
-  function handleBattle(post: Post) {
+  const handleBattle = useCallback((post: Post) => {
     if (!currentUserId) return;
     setChallengeTargetPost(post);
-  }
+  }, [currentUserId]);
 
   // Header CHALLENGE — target the athlete's most recent highlight.
   const handleHeaderChallenge = useCallback(() => {
@@ -141,15 +151,58 @@ export default function PlayerProfileScreen() {
     Alert.alert("Messaging", "Messaging is coming soon.");
   }, []);
 
-  function goBack() {
+  const goBack = useCallback(() => {
     if (router.canGoBack()) router.back();
     else router.navigate("/(tabs)" as never);
-  }
+  }, [router]);
+
+  const isGridTab = activeTab === "posts" || activeTab === "highlights";
+  const listData = useMemo<(Post | Battle)[]>(
+    () =>
+      activeTab === "posts"
+        ? sortedPosts
+        : activeTab === "highlights"
+        ? highlightPosts
+        : activeTab === "battles"
+        ? profileBattles
+        : [],
+    [activeTab, highlightPosts, profileBattles, sortedPosts]
+  );
+  const listContentStyle = useMemo(
+    () => [styles.grid, { paddingBottom: SPACING.xxxl + insets.bottom }],
+    [insets.bottom]
+  );
+  const renderProfileItem = useCallback(
+    ({ item }: { item: Post | Battle }) =>
+      isGridTab ? (
+        <PostGridThumb
+          post={item as Post}
+          onPress={setSelectedPost}
+          context="PlayerProfileGrid"
+        />
+      ) : (
+        <BattleHistoryCard
+          battle={item as Battle}
+          userId={targetUserId ?? ""}
+          currentUserId={currentUserId}
+          context="PlayerProfileBattleHistory"
+        />
+      ),
+    [currentUserId, isGridTab, targetUserId]
+  );
 
   // ── Redirect own profile to the tab so the tab bar is visible and there
   //    is no back button. Must come after all hook calls (Rules of Hooks).
   if (isSelf) {
     return <Redirect href={"/(tabs)/profile" as never} />;
+  }
+
+  if (authLoading) {
+    return (
+      <SafeAreaView style={styles.safe} edges={["top"]}>
+        <LoadingSpinner fullscreen />
+      </SafeAreaView>
+    );
   }
 
   // ── Loading / error / not-found states ─────────────────────────────────────
@@ -189,45 +242,24 @@ export default function PlayerProfileScreen() {
     );
   }
 
-  const isGridTab = activeTab === "posts" || activeTab === "highlights";
-  const listData: (Post | Battle)[] =
-    activeTab === "posts"
-      ? sortedPosts
-      : activeTab === "highlights"
-      ? highlightPosts
-      : activeTab === "battles"
-      ? profileBattles
-      : [];
-
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <Animated.FlatList
         key={activeTab}
         data={listData}
-        keyExtractor={(item: Post | Battle) => item.id}
+        keyExtractor={profileItemKey}
         numColumns={isGridTab ? 3 : 1}
-        columnWrapperStyle={isGridTab ? { gap: SPACING.sm } : undefined}
-        contentContainerStyle={styles.grid}
-        initialNumToRender={isGridTab ? 15 : 8}
-        windowSize={9}
+        columnWrapperStyle={isGridTab ? styles.gridColumns : undefined}
+        // SAFE AREA: stack screen with no tab bar — the last row/card must
+        // clear the home indicator.
+        contentContainerStyle={listContentStyle}
+        initialNumToRender={isGridTab ? 9 : 6}
+        maxToRenderPerBatch={isGridTab ? 9 : 6}
+        updateCellsBatchingPeriod={50}
+        windowSize={7}
         onScroll={scrollHandler}
         scrollEventThrottle={16}
-        renderItem={({ item }: { item: Post | Battle }) =>
-          isGridTab ? (
-            <PostGridThumb
-              post={item as Post}
-              onPress={() => setSelectedPost(item as Post)}
-              context="PlayerProfileGrid"
-            />
-          ) : (
-            <BattleHistoryCard
-              battle={item as Battle}
-              userId={targetUserId}
-              currentUserId={currentUserId}
-              context="PlayerProfileBattleHistory"
-            />
-          )
-        }
+        renderItem={renderProfileItem}
         ListHeaderComponent={
           <View style={styles.headerWrap}>
             <ProfileHeader
@@ -349,7 +381,8 @@ const styles = StyleSheet.create({
   grid: {
     paddingTop: COMPACT_BAR_HEIGHT,
     paddingHorizontal: SPACING.lg,
-    paddingBottom: SPACING.xxxl,
+    // paddingBottom applied inline — safe-area dependent.
     gap: SPACING.sm,
   },
+  gridColumns: { gap: SPACING.sm },
 });

@@ -2,7 +2,8 @@ import { Stack, Redirect } from "expo-router";
 import { useAuthStore } from "@/store/authStore";
 
 export default function AuthLayout() {
-  const { userId, isLoading } = useAuthStore();
+  const userId = useAuthStore((state) => state.userId);
+  const isLoading = useAuthStore((state) => state.isLoading);
 
   // While auth state is being determined, don't render anything.
   // The splash screen (from _layout.tsx) covers the UI during this window.

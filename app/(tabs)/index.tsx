@@ -19,7 +19,9 @@ import { useRouter } from "expo-router";
 import { useAuthStore } from "@/store/authStore";
 import { usePosts, useFollowingPosts } from "@/hooks/usePosts";
 import { useFollows } from "@/hooks/useFollows";
-import { createBattle } from "@/hooks/useBattles";
+import { createBattle, useBattles, getBattleStatus } from "@/hooks/useBattles";
+import { useUnreadNotificationCount } from "@/hooks/useNotifications";
+import { timestampToMs } from "@/services/postRepository";
 import { COLORS, SPACING, FONTS, SCRIMS } from "@/constants/theme";
 import PostCard from "@/components/PostCard";
 import BattlePickerModal from "@/components/BattlePickerModal";
@@ -127,6 +129,31 @@ export default function HomeScreen() {
     refresh:    followingRefresh,
   } = useFollowingPosts(userId, followedIds, followsLoading);
 
+  // ── Battles discovery source ──────────────────────────────────────────────────
+  // The Battles tab surfaces posts participating in REAL battles (live → open →
+  // recently completed) from the same battles query/cache the main Battles page
+  // uses — not merely posts flagged battleEnabled. The query is deferred until
+  // the tab is first opened, then stays warm for the session.
+  const [battlesEnabled, setBattlesEnabled] = useState(false);
+  useEffect(() => {
+    if (feedTab === "battles") setBattlesEnabled(true);
+  }, [feedTab]);
+  const {
+    battles,
+    loading:    battlesLoading,
+    refreshing: battlesRefreshing,
+    refresh:    battlesRefresh,
+    manualRefresh: battlesManualRefresh,
+  } = useBattles(userId, false, battlesEnabled);
+
+  // ── Notifications badge — one aggregate count read, refreshed on focus ───────
+  const { count: unreadNotifications, refresh: refreshUnread } =
+    useUnreadNotificationCount(userId);
+  const openNotifications = useCallback(
+    () => router.push("/notifications" as never),
+    [router]
+  );
+
   // ── Refresh on tab focus (Expo Router tabs don't remount) ────────────────────
   // All callbacks stored in refs so useFocusEffect only depends on the stable
   // `feedTab` string — prevents the setState→rerender→new fn→re-run loop.
@@ -139,6 +166,10 @@ export default function HomeScreen() {
   fyRefreshRef.current = fyRefresh;
   const followingRefreshRef = useRef(followingRefresh);
   followingRefreshRef.current = followingRefresh;
+  const battlesRefreshRef = useRef(battlesRefresh);
+  battlesRefreshRef.current = battlesRefresh;
+  const refreshUnreadRef = useRef(refreshUnread);
+  refreshUnreadRef.current = refreshUnread;
   const refreshFollowsRef = useRef(refreshFollows);
   refreshFollowsRef.current = refreshFollows;
   const hasFocusedRef = useRef(false);
@@ -155,28 +186,105 @@ export default function HomeScreen() {
       // Refresh whichever feed source backs the active tab.
       if (feedTab === "following") followingRefreshRef.current();
       else fyRefreshRef.current();
+      if (feedTab === "battles") battlesRefreshRef.current();
+      // Cheap aggregate read — keeps the bell badge honest after reading
+      // notifications and returning to Home.
+      void refreshUnreadRef.current();
     }, [feedTab]) // ← only feedTab; all callbacks accessed via refs
   );
 
+  // ── Battles tab derivation ────────────────────────────────────────────────────
+  // Posts participating in real battles, ordered by the CANONICAL status helper
+  // (getBattleStatus — folds expiry into "completed", never compares raw status
+  // strings): live → open → recently completed. Within each group the order is
+  // battle recency (deterministic — stable across renders; pull-to-refresh may
+  // reorder only because the data changed). Posts are resolved from the loaded
+  // discovery pool when available (full caption/likes/sport); otherwise the
+  // card is built from the battle's stored player fields — all real data.
+  const battlePosts = useMemo(() => {
+    if (battles.length === 0) return [];
+    const STATUS_RANK: Record<string, number> = { live: 0, open: 1, completed: 2 };
+    const poolById = new Map(fyPosts.map((p) => [p.id, p]));
+    const entries = new Map<string, { post: Post; priority: number; createdMs: number }>();
+
+    battles.forEach((battle) => {
+      const status = getBattleStatus(battle);
+      const priority = STATUS_RANK[status] ?? 3; // unknown → after completed, still rendered
+      const createdMs = timestampToMs(battle.createdAt);
+      [battle.playerA, battle.playerB].forEach((player) => {
+        if (!player?.postId || !player.mediaUrl?.trim()) return;
+        const isWinner = status === "completed" && !!battle.winner && battle.winner === player.userId;
+        const resolved = poolById.get(player.postId);
+        const post: Post = resolved
+          ? isWinner && !resolved.battleWon
+            ? { ...resolved, battleWon: true }
+            : resolved
+          : {
+              id: player.postId,
+              userId: player.userId,
+              username: player.username,
+              userAvatar: player.avatar,
+              avatarUrl: player.avatar,
+              mediaUrl: player.mediaUrl,
+              mediaType: player.mediaType,
+              caption: "",
+              likesCount: 0,
+              battleEnabled: status === "open",
+              createdAt: battle.createdAt,
+              battleWon: isWinner || undefined,
+            };
+        const existing = entries.get(player.postId);
+        // Keep the highest-priority appearance (a post in a live battle must
+        // never be pushed down by its completed history).
+        if (!existing || priority < existing.priority) {
+          entries.set(player.postId, { post, priority, createdMs });
+        }
+      });
+    });
+
+    return [...entries.values()]
+      .sort((a, b) => a.priority - b.priority || b.createdMs - a.createdMs)
+      .map((entry) => entry.post);
+  }, [battles, fyPosts]);
+
+  // Pull-to-refresh on the Battles tab refreshes both sources it renders from.
+  const refreshBattlesTab = useCallback(() => {
+    fyRefresh();
+    battlesManualRefresh();
+  }, [fyRefresh, battlesManualRefresh]);
+
   // ── Active feed derivation ────────────────────────────────────────────────────
-  // "battles" and sport tabs are client-side filters over the discovery pool —
-  // no extra queries, no change to the caching strategy.
+  // Sport tabs are client-side filters over the discovery pool — no extra
+  // queries, no change to the caching strategy.
   const isFollowingTab = feedTab === "following";
+  const isBattlesTab = feedTab === "battles";
   const activePosts = useMemo(() => {
     if (isFollowingTab) return followingPosts;
-    if (feedTab === "battles") return fyPosts.filter((p) => p.battleEnabled);
+    if (isBattlesTab) return battlePosts;
     if (SPORT_TABS.has(feedTab)) {
       return fyPosts.filter(
         (p) => p.sport?.toLowerCase() === feedTab.toLowerCase()
       );
     }
     return fyPosts;
-  }, [feedTab, fyPosts, followingPosts, isFollowingTab]);
+  }, [feedTab, fyPosts, followingPosts, battlePosts, isFollowingTab, isBattlesTab]);
 
-  const activeLoading    = isFollowingTab ? followingLoading   : fyLoading;
-  const activeRefresh    = isFollowingTab ? followingRefresh   : fyRefresh;
-  const activeRefreshing = isFollowingTab ? followingRefreshing : fyRefreshing;
-  const activeError      = isFollowingTab ? null : fyError;
+  const activeLoading = isFollowingTab
+    ? followingLoading
+    : isBattlesTab
+    ? battlesLoading && battlePosts.length === 0
+    : fyLoading;
+  const activeRefresh = isFollowingTab
+    ? followingRefresh
+    : isBattlesTab
+    ? refreshBattlesTab
+    : fyRefresh;
+  const activeRefreshing = isFollowingTab
+    ? followingRefreshing
+    : isBattlesTab
+    ? battlesRefreshing || fyRefreshing
+    : fyRefreshing;
+  const activeError = isFollowingTab ? null : isBattlesTab ? null : fyError;
 
   useEffect(() => {
     if (!userId) return;
@@ -213,6 +321,7 @@ export default function HomeScreen() {
   // `startingBattlePostId` tracks which postId is mid-creation so the button
   // can show a loading state while the Firestore write is in-flight.
   const [startingBattlePostId, setStartingBattlePostId] = useState<string | null>(null);
+  const startingBattleRef = useRef<string | null>(null);
 
   // `challengeTargetPost` is set when the user taps "Challenge" on someone
   // else's post — it drives the BattlePickerModal.
@@ -226,7 +335,9 @@ export default function HomeScreen() {
       }
 
       if (post.userId === userId) {
+        if (startingBattleRef.current) return;
         // ── Own post: "Start Battle" — create open challenge immediately ─────
+        startingBattleRef.current = post.id;
         setStartingBattlePostId(post.id);
         try {
           await createBattle({
@@ -247,6 +358,7 @@ export default function HomeScreen() {
           console.error("Start battle failed", err);
           Alert.alert("Failed", "Could not create battle. Please try again.");
         } finally {
+          startingBattleRef.current = null;
           setStartingBattlePostId(null);
         }
       } else {
@@ -375,10 +487,10 @@ export default function HomeScreen() {
       return (
         <EmptyState
           icon="⚔️"
-          title="No open challenges yet"
-          subtitle="Challenge another athlete and claim the first win."
-          actionLabel="Go to Battles"
-          onAction={() => router.push("/battles" as never)}
+          title="No battles to show yet"
+          subtitle="Start a challenge from any athlete highlight."
+          actionLabel="Browse highlights"
+          onAction={() => setFeedTab("forYou")}
         />
       );
     }
@@ -424,6 +536,8 @@ export default function HomeScreen() {
           feedTab={feedTab}
           onTabChange={setFeedTab}
           topInset={insets.top}
+          unreadCount={unreadNotifications}
+          onOpenNotifications={openNotifications}
         />
       </View>
     );
@@ -441,10 +555,15 @@ export default function HomeScreen() {
             getItemLayout={getItemLayout}
             onViewableItemsChanged={handleViewableItemsChanged}
             viewabilityConfig={viewabilityConfig}
-            onEndReached={!isFollowingTab && fyHasMore ? fyLoadMore : undefined}
+            onEndReached={
+              // Battles tab isn't backed by the discovery pagination window;
+              // following has its own single-page query.
+              !isFollowingTab && !isBattlesTab && fyHasMore ? fyLoadMore : undefined
+            }
             onEndReachedThreshold={0.6}
             initialNumToRender={2}
             maxToRenderPerBatch={3}
+            updateCellsBatchingPeriod={50}
             windowSize={5}
             refreshControl={
               <RefreshControl
@@ -475,6 +594,8 @@ export default function HomeScreen() {
         feedTab={feedTab}
         onTabChange={setFeedTab}
         topInset={insets.top}
+        unreadCount={unreadNotifications}
+        onOpenNotifications={openNotifications}
       />
 
       {activeError && activePosts.length > 0 ? (
@@ -521,10 +642,14 @@ function FeedHeader({
   feedTab,
   onTabChange,
   topInset,
+  unreadCount,
+  onOpenNotifications,
 }: {
   feedTab: FeedTab;
   onTabChange: (tab: FeedTab) => void;
   topInset: number;
+  unreadCount: number;
+  onOpenNotifications: () => void;
 }) {
   return (
     <View style={styles.headerOverlay} pointerEvents="box-none">
@@ -542,7 +667,24 @@ function FeedHeader({
             </View>
             <Text style={styles.logoText}>MOMENTUM</Text>
           </View>
-          <IconButton icon="bell" accessibilityLabel="Notifications" onPress={() => undefined} />
+          <View>
+            <IconButton
+              icon="bell"
+              accessibilityLabel={
+                unreadCount > 0
+                  ? `Notifications, ${unreadCount} unread`
+                  : "Notifications"
+              }
+              onPress={onOpenNotifications}
+            />
+            {unreadCount > 0 && (
+              <View style={styles.bellBadge} pointerEvents="none">
+                <Text style={styles.bellBadgeText}>
+                  {unreadCount > 9 ? "9+" : unreadCount}
+                </Text>
+              </View>
+            )}
+          </View>
         </View>
 
         {/* Horizontally scrolling discovery tabs */}
@@ -595,6 +737,26 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: SPACING.sm,
+  },
+  bellBadge: {
+    position: "absolute",
+    top: -3,
+    right: -3,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    paddingHorizontal: 3,
+    backgroundColor: COLORS.accent,
+    borderWidth: 1.5,
+    borderColor: COLORS.black,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  bellBadgeText: {
+    color: COLORS.black,
+    fontSize: 9,
+    fontWeight: FONTS.heavy,
+    includeFontPadding: false,
   },
   logoMBadge: {
     // Matches brand guide M badge: lime rounded square

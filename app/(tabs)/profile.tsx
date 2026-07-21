@@ -11,8 +11,9 @@ import {
   Alert,
   Platform,
   Share,
+  KeyboardAvoidingView,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
 import { useRouter } from "expo-router";
 import { Feather } from "@expo/vector-icons";
@@ -61,6 +62,7 @@ const PROFILE_TABS: readonly ProfileTabDef<ProfileTab>[] = [
   { key: "battles", label: "Battles", icon: "zap" },
   { key: "saved", label: "Saved", icon: "bookmark" },
 ];
+const profileItemKey = (item: Post | Battle) => item.id;
 
 // ─── Edit Profile Modal ───────────────────────────────────────────────────────
 function EditProfileModal({
@@ -76,11 +78,13 @@ function EditProfileModal({
   current: UserProfile;
   onSaved: (updatedProfile: UserProfile) => void;
 }) {
+  const insets = useSafeAreaInsets();
   const [username, setUsername] = useState(current.username);
   const [bio, setBio] = useState(current.bio);
   const [athleteType, setAthleteType] = useState(current.athleteType);
   const [avatarUri, setAvatarUri] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const savingRef = React.useRef(false);
 
   useEffect(() => {
     if (visible) {
@@ -114,6 +118,7 @@ function EditProfileModal({
   }
 
   async function save() {
+    if (savingRef.current) return;
     if (!username.trim() || username.trim().length < 3) {
       Alert.alert("Invalid username", "Username must be at least 3 characters.");
       return;
@@ -128,6 +133,7 @@ function EditProfileModal({
       return;
     }
 
+    savingRef.current = true;
     setSaving(true);
     let imageUploadFailed = false;
     try {
@@ -188,6 +194,7 @@ function EditProfileModal({
       });
       Alert.alert("Save failed", "Could not update your profile. Please try again.");
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }
@@ -195,7 +202,14 @@ function EditProfileModal({
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <View style={editStyles.overlay}>
-        <View style={editStyles.sheet}>
+        {/* KEYBOARD: text inputs live in a bottom sheet — without avoidance the
+            iOS keyboard covers the Bio field and Save button. */}
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          pointerEvents="box-none"
+        >
+        {/* SAFE AREA: Cancel sits at the sheet bottom on the screen edge. */}
+        <View style={[editStyles.sheet, { paddingBottom: insets.bottom + SPACING.xl }]}>
           <View style={editStyles.handle} />
           <Text style={editStyles.title}>Edit Profile</Text>
 
@@ -271,6 +285,7 @@ function EditProfileModal({
             <Text style={editStyles.cancelText}>Cancel</Text>
           </Pressable>
         </View>
+        </KeyboardAvoidingView>
       </View>
     </Modal>
   );
@@ -287,7 +302,7 @@ const editStyles = StyleSheet.create({
     borderTopLeftRadius: RADIUS.xl,
     borderTopRightRadius: RADIUS.xl,
     padding: SPACING.xl,
-    paddingBottom: SPACING.xxxl,
+    // paddingBottom applied inline — safe-area dependent.
   },
   handle: {
     width: 40,
@@ -375,6 +390,7 @@ export default function ProfileScreen() {
   const [activeTab, setActiveTab] = useState<ProfileTab>("posts");
   const [selectedPost, setSelectedPost] = useState<Post | null>(null);
   const [startingBattlePostId, setStartingBattlePostId] = useState<string | null>(null);
+  const startingBattleRef = React.useRef<string | null>(null);
 
   // Collapsing header — scroll offset lives on the UI thread only.
   const scrollY = useSharedValue(0);
@@ -395,11 +411,16 @@ export default function ProfileScreen() {
   );
 
   // Refresh posts when the Profile tab gains focus (tabs don't remount in Expo Router)
+  const hasFocusedRef = React.useRef(false);
   useFocusEffect(
     useCallback(() => {
-      refreshPosts();
+      if (!hasFocusedRef.current) {
+        hasFocusedRef.current = true;
+        return;
+      }
+      void refreshPosts();
       if (userId) {
-        fetchUserProfile(userId).then((freshProfile) => {
+        void fetchUserProfile(userId).then((freshProfile) => {
           if (freshProfile) setProfile(freshProfile);
         });
       }
@@ -461,8 +482,9 @@ export default function ProfileScreen() {
   }
 
   async function handleBattle(post: Post) {
-    if (!userId || !profile) return;
+    if (!userId || !profile || startingBattleRef.current) return;
 
+    startingBattleRef.current = post.id;
     setStartingBattlePostId(post.id);
     try {
       await createBattle({
@@ -484,6 +506,7 @@ export default function ProfileScreen() {
       console.error("Start battle from profile failed", err);
       Alert.alert("Failed", "Could not create battle. Please try again.");
     } finally {
+      startingBattleRef.current = null;
       setStartingBattlePostId(null);
     }
   }
@@ -523,42 +546,50 @@ export default function ProfileScreen() {
     }
   }, [profile]);
 
-  if (!profile) return <LoadingSpinner fullscreen />;
-
   const isGridTab = activeTab === "posts" || activeTab === "highlights";
-  const listData: (Post | Battle)[] =
-    activeTab === "posts"
-      ? sortedPosts
-      : activeTab === "highlights"
-      ? highlightPosts
-      : activeTab === "battles"
-      ? profileBattles
-      : [];
+  const listData = useMemo<(Post | Battle)[]>(
+    () =>
+      activeTab === "posts"
+        ? sortedPosts
+        : activeTab === "highlights"
+        ? highlightPosts
+        : activeTab === "battles"
+        ? profileBattles
+        : [],
+    [activeTab, highlightPosts, profileBattles, sortedPosts]
+  );
+  const renderProfileItem = useCallback(
+    ({ item }: { item: Post | Battle }) =>
+      isGridTab ? (
+        <PostGridThumb post={item as Post} onPress={setSelectedPost} context="ProfileGrid" />
+      ) : (
+        <BattleHistoryCard
+          battle={item as Battle}
+          userId={userId ?? ""}
+          currentUserId={userId}
+        />
+      ),
+    [isGridTab, userId]
+  );
+
+  if (!profile) return <LoadingSpinner fullscreen />;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <Animated.FlatList
         key={activeTab}
         data={listData}
-        keyExtractor={(item: Post | Battle) => item.id}
+        keyExtractor={profileItemKey}
         numColumns={isGridTab ? 3 : 1}
-        columnWrapperStyle={isGridTab ? { gap: SPACING.sm } : undefined}
+        columnWrapperStyle={isGridTab ? styles.gridColumns : undefined}
         contentContainerStyle={styles.grid}
-        initialNumToRender={isGridTab ? 15 : 8}
-        windowSize={9}
+        initialNumToRender={isGridTab ? 9 : 6}
+        maxToRenderPerBatch={isGridTab ? 9 : 6}
+        updateCellsBatchingPeriod={50}
+        windowSize={7}
         onScroll={scrollHandler}
         scrollEventThrottle={16}
-        renderItem={({ item }: { item: Post | Battle }) =>
-          isGridTab ? (
-            <PostGridThumb
-              post={item as Post}
-              onPress={() => setSelectedPost(item as Post)}
-              context="ProfileGrid"
-            />
-          ) : (
-            <BattleHistoryCard battle={item as Battle} userId={userId ?? ""} currentUserId={userId} />
-          )
-        }
+        renderItem={renderProfileItem}
         ListHeaderComponent={
           <View style={styles.headerWrap}>
             <ProfileHeader
@@ -681,4 +712,5 @@ const styles = StyleSheet.create({
     paddingBottom: SPACING.xxxl,
     gap: SPACING.sm,
   },
+  gridColumns: { gap: SPACING.sm },
 });

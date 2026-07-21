@@ -1,5 +1,6 @@
 import React from "react";
 import { View, Text, StyleSheet } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Animated, {
   interpolate,
   Extrapolation,
@@ -40,6 +41,13 @@ export default function ProfileCompactBar({
   left,
   right,
 }: Props) {
+  // SAFE AREA: keep the edge controls (back / sign-out) clear of display
+  // cutouts and rounded corners on every device — never less than the
+  // design's own padding.
+  const insets = useSafeAreaInsets();
+  const padLeft = Math.max(SPACING.md, insets.left);
+  const padRight = Math.max(SPACING.md, insets.right);
+
   const backgroundStyle = useAnimatedStyle(() => ({
     opacity: interpolate(
       scrollY.value,
@@ -69,7 +77,10 @@ export default function ProfileCompactBar({
   }));
 
   return (
-    <View style={styles.bar} pointerEvents="box-none">
+    <View
+      style={[styles.bar, { paddingLeft: padLeft, paddingRight: padRight }]}
+      pointerEvents="box-none"
+    >
       {/* Solid background + hairline, fades in as the header collapses */}
       <Animated.View style={[styles.background, backgroundStyle]} pointerEvents="none" />
 
@@ -100,7 +111,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: SPACING.md,
+    // horizontal padding applied inline — safe-area dependent.
     zIndex: 20,
   },
   background: {
