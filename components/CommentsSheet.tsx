@@ -36,6 +36,7 @@ import { MAX_COMMENT_LENGTH } from "@/services/commentRepository";
 import { notifyComment } from "@/services/notificationRepository";
 import { toHandle, formatRelativeTime } from "@/utils/format";
 import type { Post, PostComment } from "@/types";
+import { useInteractionReady } from "@/hooks/useInteractionReady";
 
 interface Props {
   visible: boolean;
@@ -149,6 +150,7 @@ export default function CommentsSheet({
   const insets = useSafeAreaInsets();
   const reducedMotion = useReducedMotion();
   const postId = post?.id ?? null;
+  const contentReady = useInteractionReady(visible, postId);
   const {
     comments,
     loading,
@@ -160,7 +162,7 @@ export default function CommentsSheet({
     refresh,
     submit,
     remove,
-  } = useComments(postId, visible);
+  } = useComments(postId, visible && contentReady);
 
   const [draft, setDraft] = useState("");
 
@@ -294,7 +296,7 @@ export default function CommentsSheet({
             )}
 
             {/* Thread */}
-            {loading && comments.length === 0 ? (
+            {(!contentReady || loading || (!loaded && !loadError)) && comments.length === 0 ? (
               <CommentSkeleton />
             ) : comments.length === 0 ? (
               <Animated.View

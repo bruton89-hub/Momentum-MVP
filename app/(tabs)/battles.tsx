@@ -13,7 +13,7 @@ import {
   Platform,
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
-import { useFocusEffect } from "@react-navigation/native";
+import { useFocusEffect, useIsFocused } from "@react-navigation/native";
 import { useRouter } from "expo-router";
 import { Feather } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
@@ -42,6 +42,7 @@ import GlowButton from "@/components/GlowButton";
 import MediaTile from "@/components/MediaTile";
 import SegmentedTabs from "@/components/SegmentedTabs";
 import type { Battle, Post, BattlePlayer } from "@/types";
+import { useInteractionReady } from "@/hooks/useInteractionReady";
 
 // Tabs: "live" = Live Battles, "mine" = My Battles, "completed" = Completed
 type Tab = "live" | "mine" | "completed";
@@ -50,7 +51,10 @@ type Tab = "live" | "mine" | "completed";
 // (built only from already-loaded battle data; virtualization preserved).
 type ListRow =
   | { type: "header"; id: string; title: string; subtitle?: string }
+  | { type: "compact"; id: string; battle: Battle }
   | { type: "battle"; id: string; battle: Battle };
+
+const battleRowKey = (item: ListRow) => item.id;
 
 // ─── Post thumbnail — uses MediaTile for native-safe rendering ───────────────
 function PostThumbItem({
@@ -117,6 +121,7 @@ function AcceptModal({
   const insets = useSafeAreaInsets();
   const [myPosts, setMyPosts] = useState<Post[]>([]);
   const [loadingPosts, setLoadingPosts] = useState(false);
+  const [postsLoaded, setPostsLoaded] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [selectedPostId, setSelectedPostId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -125,6 +130,7 @@ function AcceptModal({
   const operationRef = React.useRef(false);
 
   const battleId = battle?.id ?? null;
+  const contentReady = useInteractionReady(visible, battleId);
   const challenger = battle?.playerA ?? null;
   const selectedPost = useMemo(
     () => myPosts.find((p) => p.id === selectedPostId) ?? null,
@@ -134,11 +140,12 @@ function AcceptModal({
   // Reset the chosen post whenever a different challenge is opened.
   React.useEffect(() => {
     setSelectedPostId(null);
+    setPostsLoaded(false);
   }, [battleId]);
 
   React.useEffect(() => {
     const requestId = ++postsRequestRef.current;
-    if (!visible || !userId) return;
+    if (!visible || !contentReady || !userId) return;
     setLoadingPosts(true);
     // ── Query by all known userId field aliases ───────────────────────────────
     // We intentionally do NOT filter by `battleEnabled`: any of the user's posts
@@ -154,12 +161,15 @@ function AcceptModal({
         if (requestId === postsRequestRef.current) setMyPosts([]);
       })
       .finally(() => {
-        if (requestId === postsRequestRef.current) setLoadingPosts(false);
+        if (requestId === postsRequestRef.current) {
+          setLoadingPosts(false);
+          setPostsLoaded(true);
+        }
       });
     return () => {
       postsRequestRef.current += 1;
     };
-  }, [visible, userId]);
+  }, [contentReady, visible, userId]);
 
   // ── Upload brand-new media to use for this battle ───────────────────────────
   // Mirrors the Create screen's pattern: pick → uploadMedia → createPost. The new
@@ -327,7 +337,7 @@ function AcceptModal({
 
             {/* Post picker — choose an existing post or upload brand-new media */}
             <Text style={modal.sectionLabel}>Choose or upload your media</Text>
-            {loadingPosts ? (
+            {!contentReady || !postsLoaded || loadingPosts ? (
               <LoadingSpinner label="Loading your posts…" />
             ) : (
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={modal.row}>
@@ -364,7 +374,7 @@ function AcceptModal({
                 ))}
               </ScrollView>
             )}
-            {!loadingPosts && myPosts.length === 0 && !uploading && (
+            {contentReady && postsLoaded && !loadingPosts && myPosts.length === 0 && !uploading && (
               <Text style={modal.emptyHint}>
                 No posts yet — tap “Upload new” to add a photo or video for this battle.
               </Text>
@@ -689,6 +699,7 @@ const rowCard = StyleSheet.create({
 // ─── Main Battles Screen ──────────────────────────────────────────────────────
 export default function BattlesScreen() {
   const router = useRouter();
+  const isFocused = useIsFocused();
   const userId = useAuthStore((s) => s.userId);
   const profile = useAuthStore((s) => s.profile);
   const { battles, votedMap, loading, refreshing, error, finalizeWarning, refresh, manualRefresh, handleVote } =
@@ -768,8 +779,15 @@ export default function BattlesScreen() {
 
   // Split live tab: first live battle = hero, rest = "More Battles" list
   const heroBattle = activeTab === "live" && filtered.length > 0 ? filtered[0] : null;
-  const moreBattles = activeTab === "live" && filtered.length > 1 ? filtered.slice(1) : [];
+  const moreBattles = useMemo(
+    () => (activeTab === "live" && filtered.length > 1 ? filtered.slice(1) : []),
+    [activeTab, filtered]
+  );
   const showHeroSplit = activeTab === "live" && heroBattle !== null;
+  const heroMediaReady = useInteractionReady(
+    isFocused && showHeroSplit,
+    heroBattle?.id ?? null
+  );
 
   // ── Honest per-tab counts (from the already-loaded page — no new queries) ───
   const tabCounts = useMemo(() => {
@@ -794,7 +812,13 @@ export default function BattlesScreen() {
   // ── "My Battles" grouping — challenges sent / live / completed ──────────────
   // Built purely from loaded data. Other tabs pass battles through unchanged.
   const listRows = useMemo<ListRow[]>(() => {
-    if (showHeroSplit) return [];
+    if (showHeroSplit) {
+      return moreBattles.map((battle) => ({
+        type: "compact" as const,
+        id: battle.id,
+        battle,
+      }));
+    }
     if (activeTab !== "mine") {
       return filtered.map((b) => ({ type: "battle", id: b.id, battle: b }));
     }
@@ -821,15 +845,15 @@ export default function BattlesScreen() {
       done.forEach((b) => rows.push({ type: "battle", id: b.id, battle: b }));
     }
     return rows;
-  }, [activeTab, filtered, showHeroSplit]);
+  }, [activeTab, filtered, moreBattles, showHeroSplit]);
 
-  function openDetail(battle: Battle) {
+  const openDetail = useCallback((battle: Battle) => {
     setDetailBattle(battle);
-  }
+  }, []);
 
-  function closeDetail() {
+  const closeDetail = useCallback(() => {
     setDetailBattle(null);
-  }
+  }, []);
 
   // Open the Accept Challenge modal for a given battle id, resolving the full
   // battle object so the modal can show the challenger, category, and rules.
@@ -938,11 +962,76 @@ export default function BattlesScreen() {
     [userId]
   );
 
-  const tabDefs: { key: Tab; label: string }[] = [
-    { key: "live",      label: `Live${tabCounts.live > 0 ? ` (${tabCounts.live})` : ""}` },
-    { key: "mine",      label: `My Battles${tabCounts.mine > 0 ? ` (${tabCounts.mine})` : ""}` },
-    { key: "completed", label: `Completed${tabCounts.completed > 0 ? ` (${tabCounts.completed})` : ""}` },
-  ];
+  const renderBattleRow = useCallback(
+    ({ item, index }: { item: ListRow; index: number }) => {
+      if (item.type === "header") {
+        return (
+          <View style={styles.groupHeader} accessibilityRole="header">
+            <Text style={styles.groupHeaderTitle}>{item.title}</Text>
+            {item.subtitle ? (
+              <Text style={styles.groupHeaderSub}>{item.subtitle}</Text>
+            ) : null}
+          </View>
+        );
+      }
+
+      if (item.type === "compact") {
+        return (
+          <View
+            style={[
+              styles.moreBattleRow,
+              index === listRows.length - 1 && styles.moreBattleRowLast,
+            ]}
+          >
+            <BattleRowCard
+              battle={item.battle}
+              onPress={() => openDetail(item.battle)}
+              currentUserId={userId}
+            />
+          </View>
+        );
+      }
+
+      const battle = item.battle;
+      return (
+        <View>
+          <Pressable onPress={() => openDetail(battle)} accessible={false}>
+            <BattleCard
+              battle={battle}
+              userVote={votedMap.get(battle.id) ?? null}
+              onVote={handleVoteWithAdvance}
+              onAccept={openAccept}
+              currentUserId={userId}
+              featured={index === 0}
+            />
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [styles.viewBattleBtn, pressed && { opacity: 0.75 }]}
+            onPress={() => openDetail(battle)}
+            accessibilityRole="button"
+            accessibilityLabel={`View battle between ${battle.playerA?.username ?? "an athlete"} and ${
+              battle.playerB?.username ?? "an open slot"
+            }`}
+          >
+            <Text style={styles.viewBattleBtnText}>View Battle →</Text>
+          </Pressable>
+        </View>
+      );
+    },
+    [handleVoteWithAdvance, listRows.length, openAccept, openDetail, userId, votedMap]
+  );
+
+  const tabDefs = useMemo<{ key: Tab; label: string }[]>(
+    () => [
+      { key: "live", label: `Live${tabCounts.live > 0 ? ` (${tabCounts.live})` : ""}` },
+      { key: "mine", label: `My Battles${tabCounts.mine > 0 ? ` (${tabCounts.mine})` : ""}` },
+      {
+        key: "completed",
+        label: `Completed${tabCounts.completed > 0 ? ` (${tabCounts.completed})` : ""}`,
+      },
+    ],
+    [tabCounts]
+  );
 
   // Initial load with nothing cached — skeletons matching the card layout.
   if (loading && battles.length === 0) {
@@ -1017,7 +1106,7 @@ export default function BattlesScreen() {
           renderItem and mount lazily. */}
       <FlatList<ListRow>
         data={listRows}
-        keyExtractor={(item) => item.id}
+        keyExtractor={battleRowKey}
         showsVerticalScrollIndicator={false}
         initialNumToRender={3}
         maxToRenderPerBatch={3}
@@ -1035,52 +1124,7 @@ export default function BattlesScreen() {
         contentContainerStyle={
           filtered.length === 0 ? { flex: 1 } : { paddingBottom: SPACING.xxxl }
         }
-        renderItem={({ item, index }) => {
-          /* Group header row (My Battles) */
-          if (item.type === "header") {
-            return (
-              <View style={styles.groupHeader} accessibilityRole="header">
-                <Text style={styles.groupHeaderTitle}>{item.title}</Text>
-                {item.subtitle ? (
-                  <Text style={styles.groupHeaderSub}>{item.subtitle}</Text>
-                ) : null}
-              </View>
-            );
-          }
-          /* My Battles / Completed: regular card list — each tappable for detail.
-             WEB DOM NESTING: the card wrapper must NOT carry role="button" —
-             react-native-web renders that role as a real <button>, and
-             BattleCard contains its own <button>s (share, vote, accept),
-             which triggers validateDOMNesting. The wrapper stays a plain
-             pressable <div> for mouse/touch, `accessible={false}` keeps the
-             children individually readable, and the labelled "View Battle"
-             button below is the keyboard/screen-reader path. */
-          const b = item.battle;
-          return (
-            <View>
-              <Pressable onPress={() => openDetail(b)} accessible={false}>
-                <BattleCard
-                  battle={b}
-                  userVote={votedMap.get(b.id) ?? null}
-                  onVote={handleVoteWithAdvance}
-                  onAccept={openAccept}
-                  currentUserId={userId}
-                  featured={index === 0}
-                />
-              </Pressable>
-              <Pressable
-                style={({ pressed }) => [styles.viewBattleBtn, pressed && { opacity: 0.75 }]}
-                onPress={() => openDetail(b)}
-                accessibilityRole="button"
-                accessibilityLabel={`View battle between ${b.playerA?.username ?? "an athlete"} and ${
-                  b.playerB?.username ?? "an open slot"
-                }`}
-              >
-                <Text style={styles.viewBattleBtnText}>View Battle →</Text>
-              </Pressable>
-            </View>
-          );
-        }}
+        renderItem={renderBattleRow}
         ListHeaderComponent={
           showHeroSplit ? (
             <>
@@ -1100,7 +1144,7 @@ export default function BattlesScreen() {
                     onAccept={openAccept}
                     currentUserId={userId}
                     featured
-                    autoPlayMedia
+                    autoPlayMedia={heroMediaReady}
                   />
                 </Pressable>
                 {/* Quick actions below hero */}
@@ -1139,19 +1183,11 @@ export default function BattlesScreen() {
 
               {/* "More Battles" section — each row opens detail */}
               {moreBattles.length > 0 && (
-                <View style={styles.moreBattlesSection}>
+                <View style={styles.moreBattlesSectionHeader}>
                   <View style={styles.moreBattlesHeader}>
                     <Text style={styles.moreBattlesTitle}>More Battles</Text>
                     <Text style={styles.moreBattlesCount}>{moreBattles.length} more</Text>
                   </View>
-                  {moreBattles.map((b) => (
-                    <BattleRowCard
-                      key={b.id}
-                      battle={b}
-                      onPress={() => openDetail(b)}
-                      currentUserId={userId}
-                    />
-                  ))}
                 </View>
               )}
             </>
@@ -1324,14 +1360,30 @@ const styles = StyleSheet.create({
   },
 
   // More Battles
-  moreBattlesSection: {
+  moreBattlesSectionHeader: {
     backgroundColor: COLORS.card,
     marginHorizontal: SPACING.lg,
     marginTop: SPACING.sm,
-    borderRadius: RADIUS.xl,
+    borderTopLeftRadius: RADIUS.xl,
+    borderTopRightRadius: RADIUS.xl,
     borderWidth: 1,
+    borderBottomWidth: 0,
     borderColor: COLORS.cardBorder,
     overflow: "hidden",
+  },
+  moreBattleRow: {
+    backgroundColor: COLORS.card,
+    marginHorizontal: SPACING.lg,
+    borderLeftWidth: 1,
+    borderRightWidth: 1,
+    borderColor: COLORS.cardBorder,
+  },
+  moreBattleRowLast: {
+    borderBottomWidth: 1,
+    borderBottomLeftRadius: RADIUS.xl,
+    borderBottomRightRadius: RADIUS.xl,
+    overflow: "hidden",
+    marginBottom: SPACING.xl,
   },
   moreBattlesHeader: {
     flexDirection: "row",

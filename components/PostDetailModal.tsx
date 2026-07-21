@@ -6,6 +6,7 @@ import { COLORS, SPACING, FONTS, TYPE } from "@/constants/theme";
 import PostCard from "./PostCard";
 import CommentsSheet from "./CommentsSheet";
 import IconButton from "./IconButton";
+import { useInteractionReady } from "@/hooks/useInteractionReady";
 import type { Post } from "@/types";
 
 interface Props {
@@ -55,6 +56,7 @@ export default function PostDetailModal({
   // Close the thread whenever the viewer closes or the post changes so a
   // stale sheet can't reopen over a different highlight.
   const postId = post?.id ?? null;
+  const mediaReady = useInteractionReady(visible, postId);
   useEffect(() => {
     setCommentsOpen(false);
     if (visible) navigatingRef.current = false;
@@ -107,9 +109,10 @@ export default function PostDetailModal({
               onFollow={onFollow}
               onBattle={onBattle}
               isBattling={isBattling}
-              enableVideoPlayback
-              isActiveVideo
+              enableVideoPlayback={mediaReady}
+              isActiveVideo={mediaReady}
               isActiveCard
+              mountVideoPlayer={mediaReady}
             />
           )}
         </View>

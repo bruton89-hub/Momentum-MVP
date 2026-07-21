@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState } from "react";
-import { View, StyleSheet, Alert, Platform } from "react-native";
+import { View, StyleSheet, Alert, Platform, FlatList } from "react-native";
 import { useLocalSearchParams, useRouter, Redirect } from "expo-router";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import Animated, {
@@ -67,6 +67,7 @@ export default function PlayerProfileScreen() {
   const [activeTab, setActiveTab] = useState<ProfileTab>("posts");
   const [selectedPost, setSelectedPost] = useState<Post | null>(null);
   const [challengeTargetPost, setChallengeTargetPost] = useState<Post | null>(null);
+  const listRef = React.useRef<FlatList<Post | Battle>>(null);
 
   // Collapsing header — scroll offset lives on the UI thread only.
   const scrollY = useSharedValue(0);
@@ -106,11 +107,15 @@ export default function PlayerProfileScreen() {
 
   const handleTabChange = useCallback(
     (tab: ProfileTab) => {
-      scrollY.value = 0; // list remounts at top; keep the compact bar in sync
+      scrollY.value = 0;
       setActiveTab(tab);
     },
     [scrollY]
   );
+
+  React.useEffect(() => {
+    listRef.current?.scrollToOffset({ offset: 0, animated: false });
+  }, [activeTab]);
 
   const handleFollowToggle = useCallback(() => {
     if (!targetUserId || !currentUserId) return;
@@ -245,7 +250,8 @@ export default function PlayerProfileScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <Animated.FlatList
-        key={activeTab}
+        ref={listRef}
+        key={isGridTab ? "profile-grid" : "profile-list"}
         data={listData}
         keyExtractor={profileItemKey}
         numColumns={isGridTab ? 3 : 1}

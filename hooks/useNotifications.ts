@@ -14,7 +14,7 @@ const PAGE_SIZE = 20;
  * pagination pattern: one index-free fetch fills a pool (≤100), and
  * `loadMore` widens the visible window for infinite scroll.
  */
-export function useNotifications(userId: string | null) {
+export function useNotifications(userId: string | null, enabled = true) {
   const [pool, setPool] = useState<MomentumNotification[]>([]);
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [loading, setLoading] = useState(true);
@@ -52,11 +52,12 @@ export function useNotifications(userId: string | null) {
   );
 
   useEffect(() => {
+    if (!enabled) return;
     void fetch();
     return () => {
       requestIdRef.current += 1;
     };
-  }, [fetch]);
+  }, [enabled, fetch]);
 
   const refresh = useCallback(() => fetch(true), [fetch]);
   const loadMore = useCallback(() => {

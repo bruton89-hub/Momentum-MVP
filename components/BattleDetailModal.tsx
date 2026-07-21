@@ -43,6 +43,7 @@ import {
   getTimeRemainingLabel,
 } from "@/hooks/useBattles";
 import type { Battle, BattlePlayer } from "@/types";
+import { useInteractionReady } from "@/hooks/useInteractionReady";
 
 const { width: SCREEN_W } = Dimensions.get("window");
 // Each player thumb: half the modal width minus padding and VS column
@@ -209,6 +210,7 @@ export default function BattleDetailModal({
   // userVote stays null — this effect then re-enables the buttons.
   const [pendingSide, setPendingSide] = useState<"A" | "B" | null>(null);
   const battleId = battle?.id ?? null;
+  const mediaReady = useInteractionReady(visible, battleId);
   useEffect(() => {
     setPendingSide(null);
   }, [battleId, userVote]);
@@ -311,7 +313,7 @@ export default function BattleDetailModal({
                 battleId={battle.id}
                 onVote={onVote}
                 currentUserId={currentUserId}
-                autoPlayMedia={isLive}
+                autoPlayMedia={isLive && mediaReady}
               />
 
               <View style={detail.vsCol}>
@@ -328,7 +330,7 @@ export default function BattleDetailModal({
                 battleId={battle.id}
                 onVote={onVote}
                 currentUserId={currentUserId}
-                autoPlayMedia={isLive}
+                autoPlayMedia={isLive && mediaReady}
               />
             </View>
 

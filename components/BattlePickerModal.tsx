@@ -23,6 +23,7 @@ import { Feather } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { createLiveBattle } from "@/hooks/useBattles";
 import { notifyChallengeReceived } from "@/services/notificationRepository";
+import { useInteractionReady } from "@/hooks/useInteractionReady";
 import { fetchPostsByUser } from "@/services/postRepository";
 import { COLORS, SPACING, RADIUS, FONTS, TYPE } from "@/constants/theme";
 import AvatarImage from "./AvatarImage";
@@ -105,10 +106,17 @@ export default function BattlePickerModal({
   const insets = useSafeAreaInsets();
   const [myPosts, setMyPosts] = useState<Post[]>([]);
   const [loadingPosts, setLoadingPosts] = useState(false);
+  const [postsLoaded, setPostsLoaded] = useState(false);
   const [creating, setCreating] = useState(false);
   const [selectedPostId, setSelectedPostId] = useState<string | null>(null);
   const postsRequestRef = useRef(0);
   const creatingRef = useRef(false);
+  const targetPostId = targetPost?.id ?? null;
+  const contentReady = useInteractionReady(visible, targetPostId);
+
+  useEffect(() => {
+    setPostsLoaded(false);
+  }, [targetPostId]);
 
   // ── Load the current user's posts whenever the modal opens ──────────────────
   // Root-cause note:
@@ -122,7 +130,7 @@ export default function BattlePickerModal({
   //   This mirrors the same pattern used in useFollowingPosts and useUserPosts.
   useEffect(() => {
     const requestId = ++postsRequestRef.current;
-    if (!visible || !currentUserId) return;
+    if (!visible || !contentReady || !currentUserId) return;
     setSelectedPostId(null);
     setLoadingPosts(true);
 
@@ -137,12 +145,15 @@ export default function BattlePickerModal({
         if (requestId === postsRequestRef.current) setMyPosts([]);
       })
       .finally(() => {
-        if (requestId === postsRequestRef.current) setLoadingPosts(false);
+        if (requestId === postsRequestRef.current) {
+          setLoadingPosts(false);
+          setPostsLoaded(true);
+        }
       });
     return () => {
       postsRequestRef.current += 1;
     };
-  }, [visible, currentUserId]);
+  }, [contentReady, currentUserId, visible]);
 
   // ── Create the live battle ──────────────────────────────────────────────────
   async function handlePickPost(myPost: Post) {
@@ -254,7 +265,7 @@ export default function BattlePickerModal({
           {/* Post picker */}
           <Text style={styles.pickerLabel}>Your Posts</Text>
 
-          {loadingPosts ? (
+          {!contentReady || !postsLoaded || loadingPosts ? (
             <View style={styles.center}>
               <ActivityIndicator color={COLORS.accent} />
             </View>

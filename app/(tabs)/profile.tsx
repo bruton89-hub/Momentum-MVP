@@ -12,6 +12,7 @@ import {
   Platform,
   Share,
   KeyboardAvoidingView,
+  FlatList,
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
@@ -391,6 +392,7 @@ export default function ProfileScreen() {
   const [selectedPost, setSelectedPost] = useState<Post | null>(null);
   const [startingBattlePostId, setStartingBattlePostId] = useState<string | null>(null);
   const startingBattleRef = React.useRef<string | null>(null);
+  const listRef = React.useRef<FlatList<Post | Battle>>(null);
 
   // Collapsing header — scroll offset lives on the UI thread only.
   const scrollY = useSharedValue(0);
@@ -530,11 +532,17 @@ export default function ProfileScreen() {
 
   const handleTabChange = useCallback(
     (tab: ProfileTab) => {
-      scrollY.value = 0; // list remounts at top; keep the compact bar in sync
+      scrollY.value = 0;
       setActiveTab(tab);
     },
     [scrollY]
   );
+
+  // Keep the list instance when the column layout is unchanged, but still
+  // reset the newly selected tab to the top without an animated transition.
+  useEffect(() => {
+    listRef.current?.scrollToOffset({ offset: 0, animated: false });
+  }, [activeTab]);
 
   const handleShareProfile = useCallback(async () => {
     if (!profile) return;
@@ -577,7 +585,8 @@ export default function ProfileScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <Animated.FlatList
-        key={activeTab}
+        ref={listRef}
+        key={isGridTab ? "profile-grid" : "profile-list"}
         data={listData}
         keyExtractor={profileItemKey}
         numColumns={isGridTab ? 3 : 1}

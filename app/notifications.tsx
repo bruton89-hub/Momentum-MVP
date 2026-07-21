@@ -30,6 +30,7 @@ import { useNotifications } from "@/hooks/useNotifications";
 import { openAthleteProfile } from "@/utils/navigation";
 import { formatRelativeTime } from "@/utils/format";
 import type { MomentumNotification, NotificationType } from "@/types";
+import { useInteractionReady } from "@/hooks/useInteractionReady";
 
 // ─── Per-type presentation ────────────────────────────────────────────────────
 
@@ -183,6 +184,7 @@ export default function NotificationsScreen() {
   const insets = useSafeAreaInsets();
   const reducedMotion = useReducedMotion();
   const userId = useAuthStore((s) => s.userId);
+  const contentReady = useInteractionReady(!!userId, userId);
   const {
     notifications,
     unreadCount,
@@ -194,7 +196,7 @@ export default function NotificationsScreen() {
     loadMore,
     markRead,
     markAllRead,
-  } = useNotifications(userId);
+  } = useNotifications(userId, contentReady);
 
   function goBack() {
     if (router.canGoBack()) router.back();
@@ -279,7 +281,7 @@ export default function NotificationsScreen() {
         </View>
       )}
 
-      {loading && notifications.length === 0 ? (
+      {(!contentReady || loading) && notifications.length === 0 ? (
         <NotificationSkeleton />
       ) : (
         <FlatList
