@@ -15,6 +15,7 @@ import AvatarImage from "./AvatarImage";
 import GlowButton from "./GlowButton";
 import IconButton from "./IconButton";
 import SportBadge, { SportBadgeVariant } from "./SportBadge";
+import ProfileBanner from "./ProfileBanner";
 import { toHandle } from "@/utils/format";
 import type { UserProfile } from "@/types";
 
@@ -38,14 +39,22 @@ interface Props {
   onMessage?: () => void;
   onEdit?: () => void;
   onShare?: () => void;
-  /** Feed scroll offset — drives the subtle avatar collapse. */
+  /** Feed scroll offset — drives banner parallax and the avatar collapse. */
   scrollY?: SharedValue<number>;
 }
 
+/** Avatar diameter, and how far it overlaps the banner's bottom edge. */
+const AVATAR_SIZE = 96;
+const AVATAR_RING = 4;
+const AVATAR_OVERLAP = 46;
+
 /**
- * Premium athlete profile header — large ringed avatar, athlete-first identity
- * hierarchy, real-data badges, summary card, and the primary action row.
- * Every identity field is optional; missing data simply doesn't render.
+ * Premium athlete profile header — sport-coded banner, overlapping ringed
+ * avatar, athlete-first identity hierarchy, real-data badges, a record card,
+ * and the primary action row.
+ *
+ * Every identity field is optional; missing data simply doesn't render, so a
+ * brand-new athlete gets a clean header rather than a grid of blank labels.
  */
 export default function ProfileHeader({
   profile,
@@ -65,19 +74,21 @@ export default function ProfileHeader({
   const fallbackScroll = useSharedValue(0);
   const scroll = scrollY ?? fallbackScroll;
 
-  // Subtle scroll-linked avatar scale — pure UI-thread interpolation.
+  // Subtle scroll-linked avatar collapse — pure UI-thread interpolation.
+  // Anchored bottom-left so it shrinks toward the name rather than drifting.
   const avatarStyle = useAnimatedStyle(() => {
     if (reducedMotion) return {};
-    const scale = interpolate(scroll.value, [0, 150], [1, 0.86], Extrapolation.CLAMP);
+    const scale = interpolate(scroll.value, [0, 150], [1, 0.82], Extrapolation.CLAMP);
     return { transform: [{ scale }] };
   });
 
   const handle = toHandle(profile.username);
   const avatarUri = profile.avatarUrl || profile.avatar;
+  const sport = profile.sport || profile.athleteType;
 
   // ── Identity lines — render only what exists, never blank labels ────────────
   const sportLine = [
-    profile.sport || profile.athleteType,
+    sport,
     profile.position,
     profile.gradYear ? `Class of ${profile.gradYear}` : undefined,
   ]
@@ -108,39 +119,64 @@ export default function ProfileHeader({
     hasTrendingPost,
   ]);
 
-  // ── Summary stats — omit anything without real data ─────────────────────────
-  const stats = useMemo(() => {
-    const items: StatItem[] = [
+  // ── Counts — exactly four, so the row never wraps ───────────────────────────
+  // Win % and Momentum used to sit in this same wrapping 25%-width row, which
+  // pushed a fifth cell onto a second line and left it stranded against the
+  // left edge. They're derived/ranking figures rather than counts, so they get
+  // their own strip below where they can be labelled properly.
+  const counts = useMemo<StatItem[]>(
+    () => [
       { label: "Posts", value: postsCount },
       { label: "Battles", value: battlesCount },
       { label: "Wins", value: profile.wins },
       { label: "Losses", value: profile.losses },
-    ];
-    const decided = profile.wins + profile.losses;
-    if (decided > 0) {
-      items.push({
-        label: "Win %",
-        value: `${Math.round((profile.wins / decided) * 100)}%`,
-      });
-    }
-    if (typeof profile.momentumScore === "number") {
-      items.push({ label: "Momentum", value: profile.momentumScore });
-    }
-    return items;
-  }, [postsCount, battlesCount, profile.wins, profile.losses, profile.momentumScore]);
+    ],
+    [postsCount, battlesCount, profile.wins, profile.losses]
+  );
+
+  const decided = profile.wins + profile.losses;
+  const winRate = decided > 0 ? Math.round((profile.wins / decided) * 100) : null;
+  const hasRecordStrip = winRate !== null || typeof profile.momentumScore === "number";
 
   const entrance = (delay: number) =>
     reducedMotion ? undefined : FadeIn.duration(280).delay(delay);
 
   return (
     <View style={styles.wrap}>
-      {/* ── Identity ─────────────────────────────────────────────────────────── */}
+      <ProfileBanner
+        bannerUrl={profile.bannerUrl}
+        sport={sport}
+        scrollY={scrollY}
+      />
+
+      {/* ── Identity — pulled up over the banner's lower edge ────────────────── */}
       <View style={styles.identity}>
-        <Animated.View style={avatarStyle}>
-          <View style={[styles.avatarRing, profile.verified && styles.avatarRingVerified]}>
-            <AvatarImage uri={avatarUri} username={profile.username} size={96} />
-          </View>
-        </Animated.View>
+        <View style={styles.avatarRow}>
+          <Animated.View style={avatarStyle}>
+            <View
+              style={[
+                styles.avatarRing,
+                profile.verified && styles.avatarRingVerified,
+              ]}
+            >
+              <AvatarImage
+                uri={avatarUri}
+                username={profile.username}
+                size={AVATAR_SIZE}
+              />
+            </View>
+          </Animated.View>
+
+          {/* Badges sit beside the avatar, in the space the banner opened up,
+              instead of consuming a full row of vertical rhythm. */}
+          {badges.length > 0 && (
+            <Animated.View entering={entrance(60)} style={styles.badgeRow}>
+              {badges.map((variant) => (
+                <SportBadge key={variant} variant={variant} />
+              ))}
+            </Animated.View>
+          )}
+        </View>
 
         <View style={styles.nameRow}>
           <Text style={styles.name} accessibilityRole="header" numberOfLines={1}>
@@ -158,18 +194,11 @@ export default function ProfileHeader({
         <Text style={styles.handle}>{handle}</Text>
 
         {sportLine ? <Text style={styles.sportLine}>{sportLine}</Text> : null}
-        {programLine ? <Text style={styles.programLine}>{programLine}</Text> : null}
+        {programLine ? (
+          <Text style={styles.programLine}>{programLine}</Text>
+        ) : null}
         {profile.bio ? <Text style={styles.bio}>{profile.bio}</Text> : null}
       </View>
-
-      {/* ── Badges ───────────────────────────────────────────────────────────── */}
-      {badges.length > 0 && (
-        <Animated.View entering={entrance(60)} style={styles.badgeRow}>
-          {badges.map((variant) => (
-            <SportBadge key={variant} variant={variant} />
-          ))}
-        </Animated.View>
-      )}
 
       {/* ── Primary actions ──────────────────────────────────────────────────── */}
       <View style={styles.actionRow}>
@@ -236,19 +265,56 @@ export default function ProfileHeader({
         )}
       </View>
 
-      {/* ── Athlete summary card ─────────────────────────────────────────────── */}
+      {/* ── Record card ──────────────────────────────────────────────────────── */}
       <Animated.View entering={entrance(120)} style={styles.summaryCard}>
-        {stats.map((stat) => (
-          <View
-            key={stat.label}
-            style={styles.stat}
-            accessible
-            accessibilityLabel={`${stat.value} ${stat.label}`}
-          >
-            <Text style={styles.statValue}>{stat.value}</Text>
-            <Text style={styles.statLabel}>{stat.label}</Text>
+        <View style={styles.countRow}>
+          {counts.map((stat) => (
+            <View
+              key={stat.label}
+              style={styles.stat}
+              accessible
+              accessibilityLabel={`${stat.value} ${stat.label}`}
+            >
+              <Text style={styles.statValue}>{stat.value}</Text>
+              <Text style={styles.statLabel}>{stat.label}</Text>
+            </View>
+          ))}
+        </View>
+
+        {hasRecordStrip && (
+          <View style={styles.recordStrip}>
+            {winRate !== null && (
+              <View
+                style={styles.recordItem}
+                accessible
+                accessibilityLabel={`Win rate ${winRate} percent, from ${decided} decided battles`}
+              >
+                <MaterialCommunityIcons
+                  name="trophy-outline"
+                  size={13}
+                  color={COLORS.accent}
+                />
+                <Text style={styles.recordValue}>{winRate}%</Text>
+                <Text style={styles.recordLabel}>win rate</Text>
+              </View>
+            )}
+            {typeof profile.momentumScore === "number" && (
+              <View
+                style={styles.recordItem}
+                accessible
+                accessibilityLabel={`Momentum score ${profile.momentumScore}`}
+              >
+                <MaterialCommunityIcons
+                  name="lightning-bolt-outline"
+                  size={13}
+                  color={COLORS.accent}
+                />
+                <Text style={styles.recordValue}>{profile.momentumScore}</Text>
+                <Text style={styles.recordLabel}>momentum</Text>
+              </View>
+            )}
           </View>
-        ))}
+        )}
       </Animated.View>
     </View>
   );
@@ -262,20 +328,28 @@ const styles = StyleSheet.create({
 
   // ── Identity ─────────────────────────────────────────────────────────────────
   identity: {
-    alignItems: "center",
-    paddingHorizontal: SPACING.xl,
-    paddingTop: SPACING.sm,
+    paddingHorizontal: SPACING.lg,
+    // Lifts the avatar so it straddles the banner's bottom edge.
+    marginTop: -AVATAR_OVERLAP,
     gap: 3,
   },
+  avatarRow: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    justifyContent: "space-between",
+    marginBottom: SPACING.md,
+  },
   avatarRing: {
-    width: 108,
-    height: 108,
-    borderRadius: 54,
-    borderWidth: 2.5,
-    borderColor: COLORS.cardBorder,
+    width: AVATAR_SIZE + AVATAR_RING * 2,
+    height: AVATAR_SIZE + AVATAR_RING * 2,
+    borderRadius: (AVATAR_SIZE + AVATAR_RING * 2) / 2,
+    borderWidth: AVATAR_RING,
+    // Ring is the page background, not a grey line — it reads as the avatar
+    // punching a hole through the banner rather than sitting on top of it.
+    borderColor: COLORS.background,
+    backgroundColor: COLORS.background,
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: SPACING.md,
   },
   avatarRingVerified: {
     borderColor: COLORS.accent,
@@ -304,7 +378,7 @@ const styles = StyleSheet.create({
     fontSize: TYPE.footnote,
     fontWeight: FONTS.bold,
     letterSpacing: 0.4,
-    marginTop: SPACING.xs,
+    marginTop: SPACING.sm,
   },
   programLine: {
     color: COLORS.textSecondary,
@@ -316,7 +390,6 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     fontSize: TYPE.footnote,
     lineHeight: 19,
-    textAlign: "center",
     marginTop: SPACING.sm,
   },
 
@@ -324,10 +397,14 @@ const styles = StyleSheet.create({
   badgeRow: {
     flexDirection: "row",
     flexWrap: "wrap",
-    justifyContent: "center",
+    justifyContent: "flex-end",
+    alignItems: "center",
     gap: 6,
-    paddingHorizontal: SPACING.lg,
-    paddingTop: SPACING.md,
+    flexShrink: 1,
+    paddingLeft: SPACING.md,
+    // Nudged down so badges align with the avatar's lower half rather than
+    // colliding with the banner artwork above it.
+    paddingBottom: SPACING.xs,
   },
 
   // ── Actions ──────────────────────────────────────────────────────────────────
@@ -342,23 +419,25 @@ const styles = StyleSheet.create({
   actionHero: { flex: 1.35 },
   challengeText: { letterSpacing: 1 },
 
-  // ── Summary card ─────────────────────────────────────────────────────────────
+  // ── Record card ──────────────────────────────────────────────────────────────
   summaryCard: {
-    flexDirection: "row",
-    flexWrap: "wrap",
     marginHorizontal: SPACING.lg,
     marginTop: SPACING.lg,
     marginBottom: SPACING.sm,
-    paddingVertical: SPACING.md,
     borderRadius: RADIUS.lg,
     borderWidth: 1,
     borderColor: COLORS.cardBorder,
     backgroundColor: COLORS.surfaceRaised,
+    overflow: "hidden",
+  },
+  countRow: {
+    flexDirection: "row",
+    paddingVertical: SPACING.md,
   },
   stat: {
-    width: "25%",
+    flex: 1,
     alignItems: "center",
-    paddingVertical: SPACING.sm,
+    paddingVertical: SPACING.xs,
   },
   statValue: {
     color: COLORS.textPrimary,
@@ -372,5 +451,31 @@ const styles = StyleSheet.create({
     textTransform: "uppercase",
     letterSpacing: 0.6,
   },
+  recordStrip: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: SPACING.xl,
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.cardBorder,
+    backgroundColor: COLORS.surface,
+  },
+  recordItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+  },
+  recordValue: {
+    color: COLORS.textPrimary,
+    fontSize: TYPE.footnote,
+    fontWeight: FONTS.heavy,
+  },
+  recordLabel: {
+    color: COLORS.textMuted,
+    fontSize: TYPE.micro,
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
+  },
 });
-

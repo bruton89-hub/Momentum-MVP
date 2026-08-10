@@ -28,6 +28,7 @@ const {
 test("future callable command names remain stable", () => {
   assert.equal(engagement.SET_POST_LIKE_COMMAND, "setPostLike");
   assert.equal(engagement.CAST_BATTLE_VOTE_COMMAND, "castBattleVote");
+  assert.equal(engagement.DELETE_POST_COMMAND, "deletePost");
   assert.equal(profiles.CLAIM_USERNAME_COMMAND, "claimUsernameAndCreateProfile");
   assert.equal(profiles.RENAME_USERNAME_COMMAND, "renameUsername");
   assert.equal(battles.FINALIZE_BATTLE_COMMAND, "finalizeBattle");

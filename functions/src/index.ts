@@ -18,13 +18,17 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { logger } from "firebase-functions";
 import { initializeApp } from "firebase-admin/app";
 import {
+  type DocumentReference,
   getFirestore,
   FieldValue,
   Timestamp,
 } from "firebase-admin/firestore";
+import { getStorage } from "firebase-admin/storage";
 import {
   type CastBattleVoteRequest,
   type CastBattleVoteResponse,
+  type DeletePostRequest,
+  type DeletePostResponse,
   type SetPostLikeRequest,
   type SetPostLikeResponse,
 } from "./contracts/engagement";
@@ -43,6 +47,7 @@ const db = getFirestore();
 
 // Must match the region the client targets via getFunctions(app).
 const REGION = "us-central1";
+const DELETE_BATCH_SIZE = 400;
 
 interface BattlePlayer {
   userId?: string;
@@ -120,6 +125,15 @@ export const finalizeBattle = onCall(
         };
       }
 
+      // Already expired — nothing further to do.
+      if (data.status === "expired") {
+        return {
+          battleId,
+          status: "already_recorded" as const,
+          winner: null,
+        };
+      }
+
       // The battle must actually be over (server clock is authoritative).
       const endMs = resolveEndTimeMs(data);
       const isCompleted =
@@ -136,6 +150,32 @@ export const finalizeBattle = onCall(
       const playerB = (data.playerB as BattlePlayer | null) ?? null;
       const votesA = typeof data.votesA === "number" ? data.votesA : 0;
       const votesB = typeof data.votesB === "number" ? data.votesB : 0;
+
+      // ── Unmatched challenge: nobody ever accepted ──────────────────────────
+      // This is NOT a completed battle. Marking it completed put "Waiting for
+      // challenger" cards in the Completed tab and inflated every athlete's
+      // battle count with contests that never happened. It expires instead:
+      // no winner, no stats, and hidden from every surface.
+      //
+      // Checked before the winner logic on purpose — with playerB null, a
+      // single vote on A would otherwise crown a walkover winner.
+      if (!playerA?.userId || !playerB?.userId) {
+        tx.update(battleRef, {
+          status: "expired",
+          winner: null,
+          // statsRecorded true = "finalization is done for this doc", which is
+          // what makes the callable idempotent. It does NOT mean a result was
+          // recorded; no wins or losses are written below.
+          statsRecorded: true,
+          finalizedAt: FieldValue.serverTimestamp(),
+        });
+
+        return {
+          battleId,
+          status: "expired" as const,
+          winner: null,
+        };
+      }
 
       let winnerId: string | null = null;
       if (votesA > votesB) winnerId = playerA?.userId ?? null;
@@ -180,10 +220,11 @@ export const finalizeBattle = onCall(
 
     // Avoid charging for repetitive idempotent info logs when multiple clients
     // observe the same expired battle.
-    if (result.status === "finalized") {
+    if (result.status === "finalized" || result.status === "expired") {
       logger.info("[finalizeBattle] done", {
         battleId,
         requestedBy: uid,
+        outcome: result.status,
         winner: result.winner,
       });
     }
@@ -351,5 +392,199 @@ export const setPostLike = onCall<
         outcome: "applied" as const,
       };
     });
+  }
+);
+
+// ─── Server-authoritative post deletion ─────────────────────────────────────
+
+interface OwnedStorageObject {
+  bucket: string;
+  path: string;
+}
+
+function storageObjectFromValue(
+  value: unknown,
+  ownerId: string
+): OwnedStorageObject | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  let bucket = "";
+  let path = "";
+  try {
+    if (value.startsWith("gs://")) {
+      const parts = value.slice(5).split("/");
+      bucket = parts.shift() ?? "";
+      path = parts.join("/");
+    } else {
+      const url = new URL(value);
+      const firebaseObjectMarker = "/o/";
+      const markerIndex = url.pathname.indexOf(firebaseObjectMarker);
+      if (markerIndex >= 0) {
+        const bucketMatch = url.pathname.match(/\/b\/([^/]+)\/o\//);
+        bucket = bucketMatch ? decodeURIComponent(bucketMatch[1]) : "";
+        path = decodeURIComponent(
+          url.pathname.slice(markerIndex + firebaseObjectMarker.length)
+        );
+      } else if (url.hostname === "storage.googleapis.com") {
+        const parts = url.pathname.split("/").filter(Boolean);
+        bucket = decodeURIComponent(parts.shift() ?? "");
+        path = decodeURIComponent(parts.join("/"));
+      }
+    }
+  } catch {
+    return null;
+  }
+  const ownerPrefix = `posts/${ownerId}/`;
+  return bucket && path.startsWith(ownerPrefix) ? { bucket, path } : null;
+}
+
+async function deleteReferences(references: DocumentReference[]): Promise<void> {
+  for (let index = 0; index < references.length; index += DELETE_BATCH_SIZE) {
+    const batch = db.batch();
+    references
+      .slice(index, index + DELETE_BATCH_SIZE)
+      .forEach((reference) => batch.delete(reference));
+    await batch.commit();
+  }
+}
+
+export const deletePost = onCall<
+  DeletePostRequest,
+  Promise<DeletePostResponse>
+>(
+  {
+    region: REGION,
+    enforceAppCheck: false,
+    timeoutSeconds: 120,
+  },
+  async (request) => {
+    const uid = requireAuthenticatedUid(request.auth);
+    const data = requireRecord(request.data);
+    const postId = requireString(data.postId, "postId", { maxLength: 128 });
+    const postRef = db.collection("posts").doc(postId);
+    const postSnap = await postRef.get();
+
+    // Idempotent retries after a successful deletion issue no writes.
+    if (!postSnap.exists) {
+      return {
+        postId,
+        outcome: "already_applied",
+        deleted: { comments: 0, likes: 0, notifications: 0 },
+        mediaCleanupComplete: true,
+        mediaRetainedForBattleHistory: false,
+      };
+    }
+
+    const post = (postSnap.data() ?? {}) as Record<string, unknown>;
+    if (post.userId !== uid) {
+      throw new HttpsError(
+        "permission-denied",
+        "You can only delete your own posts."
+      );
+    }
+
+    const [playerABattles, playerBBattles] = await Promise.all([
+      db.collection("battles").where("playerA.postId", "==", postId).get(),
+      db.collection("battles").where("playerB.postId", "==", postId).get(),
+    ]);
+    const referencedBattles = new Map(
+      [...playerABattles.docs, ...playerBBattles.docs].map((snapshot) => [
+        snapshot.id,
+        snapshot,
+      ])
+    );
+    const activeBattle = [...referencedBattles.values()].find(
+      (snapshot) => snapshot.get("status") !== "completed"
+    );
+    if (activeBattle) {
+      throw new HttpsError(
+        "failed-precondition",
+        "This post is currently part of an active battle and cannot be deleted yet."
+      );
+    }
+
+    const [comments, likes, notifications] = await Promise.all([
+      db.collection("comments").where("postId", "==", postId).get(),
+      db.collection("likes").where("postId", "==", postId).get(),
+      db.collection("notifications").where("postId", "==", postId).get(),
+    ]);
+
+    // Delete dependent documents first. The post remains visible/retriable if
+    // a batch fails; the post itself and profile count are committed together.
+    await deleteReferences([
+      ...comments.docs.map((snapshot) => snapshot.ref),
+      ...likes.docs.map((snapshot) => snapshot.ref),
+      ...notifications.docs.map((snapshot) => snapshot.ref),
+    ]);
+
+    await db.runTransaction(async (transaction) => {
+      const latestPost = await transaction.get(postRef);
+      if (!latestPost.exists) return;
+      if (latestPost.get("userId") !== uid) {
+        throw new HttpsError(
+          "permission-denied",
+          "You can only delete your own posts."
+        );
+      }
+
+      const userRef = db.collection("users").doc(uid);
+      const userSnap = await transaction.get(userRef);
+      transaction.delete(postRef);
+      if (userSnap.exists) {
+        const currentCount = userSnap.get("posts");
+        if (typeof currentCount === "number" && currentCount > 0) {
+          transaction.update(userRef, { posts: Math.max(0, currentCount - 1) });
+        }
+      }
+    });
+
+    const mediaRetainedForBattleHistory = referencedBattles.size > 0;
+    let mediaCleanupComplete = true;
+    if (!mediaRetainedForBattleHistory) {
+      const mediaObjects = new Map(
+        [post.mediaUrl, post.originalMediaUrl]
+          .map((value) => storageObjectFromValue(value, uid))
+          .filter((object): object is OwnedStorageObject => object !== null)
+          .map((object) => [`${object.bucket}/${object.path}`, object])
+      );
+      const cleanupResults = await Promise.allSettled(
+        [...mediaObjects.values()].map(({ bucket, path }) =>
+          getStorage().bucket(bucket).file(path).delete({ ignoreNotFound: true })
+        )
+      );
+      mediaCleanupComplete = cleanupResults.every(
+        (result) => result.status === "fulfilled"
+      );
+      if (!mediaCleanupComplete) {
+        logger.error("[deletePost] media cleanup incomplete", {
+          postId,
+          ownerId: uid,
+          failedFileCount: cleanupResults.filter(
+            (result) => result.status === "rejected"
+          ).length,
+        });
+      }
+    }
+
+    logger.info("[deletePost] completed", {
+      postId,
+      ownerId: uid,
+      commentsDeleted: comments.size,
+      likesDeleted: likes.size,
+      notificationsDeleted: notifications.size,
+      mediaCleanupComplete,
+      mediaRetainedForBattleHistory,
+    });
+
+    return {
+      postId,
+      outcome: "applied",
+      deleted: {
+        comments: comments.size,
+        likes: likes.size,
+        notifications: notifications.size,
+      },
+      mediaCleanupComplete,
+      mediaRetainedForBattleHistory,
+    };
   }
 );

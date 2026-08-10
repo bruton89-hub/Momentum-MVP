@@ -8,10 +8,10 @@ import {
   RefreshControl,
   Modal,
   ScrollView,
-  Alert,
   ActivityIndicator,
   Platform,
 } from "react-native";
+import { showAlert, confirm } from "@/utils/alert";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect, useIsFocused } from "@react-navigation/native";
 import { useRouter } from "expo-router";
@@ -32,7 +32,6 @@ import { fetchPostsByUser } from "@/services/postRepository";
 import { COLORS, SPACING, FONTS, RADIUS } from "@/constants/theme";
 import { openAthleteProfile } from "@/utils/navigation";
 import { toHandle } from "@/utils/format";
-import BattleCard from "@/components/BattleCard";
 import BattleCardSkeleton from "@/components/BattleCardSkeleton";
 import BattleDetailModal from "@/components/BattleDetailModal";
 import EmptyState from "@/components/EmptyState";
@@ -41,20 +40,41 @@ import AvatarImage from "@/components/AvatarImage";
 import GlowButton from "@/components/GlowButton";
 import MediaTile from "@/components/MediaTile";
 import SegmentedTabs from "@/components/SegmentedTabs";
+import Chip from "@/components/Chip";
+import FeaturedBattle from "@/components/battles/FeaturedBattle";
+import OpenChallengeRow from "@/components/battles/OpenChallengeRow";
+import ActiveBattleRow from "@/components/battles/ActiveBattleRow";
+import BattleResultCard from "@/components/battles/BattleResultCard";
+import { shareBattle, shareBattleResult } from "@/utils/shareBattle";
 import type { Battle, Post, BattlePlayer } from "@/types";
 import { useInteractionReady } from "@/hooks/useInteractionReady";
 
 // Tabs: "live" = Live Battles, "mine" = My Battles, "completed" = Completed
 type Tab = "live" | "mine" | "completed";
 
-// List rows — "My Battles" injects lightweight group headers between cards
-// (built only from already-loaded battle data; virtualization preserved).
+/**
+ * My Battles sub-filters.
+ *
+ * There is no "Challenges Received": BattlePickerModal creates a LIVE battle
+ * with both players in a single write, so an inbound challenge is never in a
+ * pending state a filter could show. Adding one would mean inventing a status
+ * the backend doesn't have.
+ */
+type MineFilter = "all" | "active" | "sent" | "completed";
+
+// List rows — every tab is one virtualized list, so headers, the featured
+// hero, the trending rail, and the card lists all flow through renderItem and
+// mount lazily. Only already-loaded battle data is used.
 type ListRow =
   | { type: "header"; id: string; title: string; subtitle?: string }
-  | { type: "compact"; id: string; battle: Battle }
-  | { type: "battle"; id: string; battle: Battle };
+  | { type: "featured"; id: string; battle: Battle }
+  | { type: "rail"; id: string; battles: Battle[] }
+  | { type: "challenge"; id: string; battle: Battle }
+  | { type: "active"; id: string; battle: Battle }
+  | { type: "result"; id: string; battle: Battle };
 
 const battleRowKey = (item: ListRow) => item.id;
+const railKey = (item: Battle) => item.id;
 
 // ─── Post thumbnail — uses MediaTile for native-safe rendering ───────────────
 function PostThumbItem({
@@ -223,7 +243,7 @@ function AcceptModal({
       setSelectedPostId(newPostId);
     } catch (err) {
       console.error("[acceptModal] upload failed:", err);
-      Alert.alert("Upload failed", "Could not upload that media. Please try again.");
+      showAlert("Upload failed", "Could not upload that media. Please try again.");
     } finally {
       operationRef.current = false;
       setUploading(false);
@@ -252,7 +272,7 @@ function AcceptModal({
       onAccepted();
       onClose();
     } catch {
-      Alert.alert("Error", "Could not accept challenge. Try again.");
+      showAlert("Error", "Could not accept challenge. Try again.");
     } finally {
       operationRef.current = false;
       setSubmitting(false);
@@ -708,6 +728,7 @@ export default function BattlesScreen() {
   // UI shows "Live Battles", "My Battles", "Completed"
   const [activeTab, setActiveTab] = useState<Tab>("live");
   const [acceptBattle, setAcceptBattle] = useState<Battle | null>(null);
+  const [mineFilter, setMineFilter] = useState<MineFilter>("all");
   // Detail modal: which battle is open in detail view
   const [detailBattle, setDetailBattle] = useState<Battle | null>(null);
 
@@ -745,107 +766,147 @@ export default function BattlesScreen() {
     };
   }, []);
 
-  // ── Filter logic using getBattleStatus ──────────────────────────────────────
-  // Live:      active live battles first, then open challenges
-  // Mine:      any battle where current user is playerA, playerB, or creator
-  // Completed: only ended/completed battles
-  const filtered = useMemo(() => {
-    const visible = battles.filter((b) => {
-      const status = getBattleStatus(b);
-      if (activeTab === "live")
-        return status === "live" || status === "open";
-      if (activeTab === "completed")
-        return status === "completed";
-      if (activeTab === "mine")
-        return (
-          b.playerA?.userId === userId ||
-          b.playerB?.userId === userId ||
-          b.creatorId === userId
-        );
-      return true;
-    });
-
-    // Live tab: live battles first, open challenges second
-    if (activeTab === "live") {
-      return [...visible].sort((a, b) => {
-        const rankA = getBattleStatus(a) === "live" ? 0 : 1;
-        const rankB = getBattleStatus(b) === "live" ? 0 : 1;
-        return rankA - rankB;
-      });
-    }
-
-    return visible;
-  }, [activeTab, battles, userId]);
-
-  // Split live tab: first live battle = hero, rest = "More Battles" list
-  const heroBattle = activeTab === "live" && filtered.length > 0 ? filtered[0] : null;
-  const moreBattles = useMemo(
-    () => (activeTab === "live" && filtered.length > 1 ? filtered.slice(1) : []),
-    [activeTab, filtered]
+  // ── Section derivations ─────────────────────────────────────────────────────
+  // All statuses come from getBattleStatus, the canonical helper: it folds
+  // expiry into "completed" for MATCHED battles and into "expired" for
+  // challenges nobody accepted. Expired never reaches any tab.
+  const live = useMemo(
+    () => battles.filter((b) => getBattleStatus(b) === "live"),
+    [battles]
   );
-  const showHeroSplit = activeTab === "live" && heroBattle !== null;
-  const heroMediaReady = useInteractionReady(
-    isFocused && showHeroSplit,
-    heroBattle?.id ?? null
+  const openChallenges = useMemo(
+    () => battles.filter((b) => getBattleStatus(b) === "open"),
+    [battles]
+  );
+  const completed = useMemo(
+    () => battles.filter((b) => getBattleStatus(b) === "completed"),
+    [battles]
   );
 
-  // ── Honest per-tab counts (from the already-loaded page — no new queries) ───
-  const tabCounts = useMemo(() => {
-    let live = 0;
-    let mine = 0;
-    let completed = 0;
-    battles.forEach((b) => {
-      const status = getBattleStatus(b);
-      if (status === "live" || status === "open") live += 1;
-      if (status === "completed") completed += 1;
-      if (
-        b.playerA?.userId === userId ||
+  const participates = useCallback(
+    (b: Battle) =>
+      !!userId &&
+      (b.playerA?.userId === userId ||
         b.playerB?.userId === userId ||
-        b.creatorId === userId
-      ) {
-        mine += 1;
-      }
-    });
-    return { live, mine, completed };
-  }, [battles, userId]);
+        b.creatorId === userId),
+    [userId]
+  );
 
-  // ── "My Battles" grouping — challenges sent / live / completed ──────────────
-  // Built purely from loaded data. Other tabs pass battles through unchanged.
+  const myActive = useMemo(
+    () => live.filter(participates),
+    [live, participates]
+  );
+  // "Challenges Sent" = open challenges this athlete created and nobody has
+  // accepted yet. There is deliberately no "Challenges Received" filter:
+  // BattlePickerModal creates a LIVE battle with both players immediately, so
+  // Momentum has no pending inbound-challenge state to back one.
+  const myChallengesSent = useMemo(
+    () => openChallenges.filter((b) => b.creatorId === userId),
+    [openChallenges, userId]
+  );
+  const myCompleted = useMemo(
+    () => completed.filter(participates),
+    [completed, participates]
+  );
+
+  // Featured = the first live battle the viewer can still vote on, so the hero
+  // is always actionable; otherwise just the first live battle.
+  const featuredBattle = useMemo(() => {
+    if (live.length === 0) return null;
+    const votable = live.find(
+      (b) =>
+        !votedMap.has(b.id) &&
+        !!userId &&
+        b.playerA?.userId !== userId &&
+        b.playerB?.userId !== userId
+    );
+    return votable ?? live[0];
+  }, [live, votedMap, userId]);
+
+  const trendingBattles = useMemo(
+    () => live.filter((b) => b.id !== featuredBattle?.id),
+    [live, featuredBattle]
+  );
+
+  // ── Honest per-tab counts (already-loaded data — no new queries) ────────────
+  const tabCounts = useMemo(
+    () => ({
+      live: live.length + openChallenges.length,
+      mine: myActive.length + myChallengesSent.length + myCompleted.length,
+      completed: completed.length,
+    }),
+    [live, openChallenges, myActive, myChallengesSent, myCompleted, completed]
+  );
+
+  // ── Rows ────────────────────────────────────────────────────────────────────
   const listRows = useMemo<ListRow[]>(() => {
-    if (showHeroSplit) {
-      return moreBattles.map((battle) => ({
-        type: "compact" as const,
-        id: battle.id,
-        battle,
-      }));
-    }
-    if (activeTab !== "mine") {
-      return filtered.map((b) => ({ type: "battle", id: b.id, battle: b }));
-    }
-    const waiting: Battle[] = [];
-    const liveNow: Battle[] = [];
-    const done: Battle[] = [];
-    filtered.forEach((b) => {
-      const status = getBattleStatus(b);
-      if (status === "open") waiting.push(b);
-      else if (status === "live") liveNow.push(b);
-      else done.push(b);
-    });
     const rows: ListRow[] = [];
-    if (liveNow.length > 0) {
-      rows.push({ type: "header", id: "h-live", title: "Live now", subtitle: "The community is voting" });
-      liveNow.forEach((b) => rows.push({ type: "battle", id: b.id, battle: b }));
+
+    if (activeTab === "live") {
+      if (featuredBattle) {
+        rows.push({ type: "featured", id: `f-${featuredBattle.id}`, battle: featuredBattle });
+      }
+      if (trendingBattles.length > 0) {
+        rows.push({
+          type: "header",
+          id: "h-trending",
+          title: "Trending Battles",
+          subtitle: `${trendingBattles.length} more live right now`,
+        });
+        rows.push({ type: "rail", id: "rail-trending", battles: trendingBattles });
+      }
+      if (openChallenges.length > 0) {
+        rows.push({
+          type: "header",
+          id: "h-open",
+          title: "Open Challenges",
+          subtitle: "Accept one and the battle goes live",
+        });
+        openChallenges.forEach((b) =>
+          rows.push({ type: "challenge", id: b.id, battle: b })
+        );
+      }
+      return rows;
     }
-    if (waiting.length > 0) {
-      rows.push({ type: "header", id: "h-open", title: "Challenges sent", subtitle: "Waiting for an opponent" });
-      waiting.forEach((b) => rows.push({ type: "battle", id: b.id, battle: b }));
+
+    if (activeTab === "mine") {
+      const showActive = mineFilter === "all" || mineFilter === "active";
+      const showSent = mineFilter === "all" || mineFilter === "sent";
+      const showDone = mineFilter === "all" || mineFilter === "completed";
+
+      if (showActive && myActive.length > 0) {
+        rows.push({ type: "header", id: "h-active", title: "Active", subtitle: "The community is voting" });
+        myActive.forEach((b) => rows.push({ type: "active", id: b.id, battle: b }));
+      }
+      if (showSent && myChallengesSent.length > 0) {
+        rows.push({
+          type: "header",
+          id: "h-sent",
+          title: "Challenges sent",
+          subtitle: "Waiting for an opponent",
+        });
+        myChallengesSent.forEach((b) => rows.push({ type: "active", id: b.id, battle: b }));
+      }
+      if (showDone && myCompleted.length > 0) {
+        rows.push({ type: "header", id: "h-done", title: "Results" });
+        myCompleted.forEach((b) => rows.push({ type: "result", id: b.id, battle: b }));
+      }
+      return rows;
     }
-    if (done.length > 0) {
-      rows.push({ type: "header", id: "h-done", title: "Completed" });
-      done.forEach((b) => rows.push({ type: "battle", id: b.id, battle: b }));
-    }
+
+    completed.forEach((b) => rows.push({ type: "result", id: b.id, battle: b }));
     return rows;
-  }, [activeTab, filtered, moreBattles, showHeroSplit]);
+  }, [
+    activeTab,
+    featuredBattle,
+    trendingBattles,
+    openChallenges,
+    mineFilter,
+    myActive,
+    myChallengesSent,
+    myCompleted,
+    completed,
+  ]);
 
   const openDetail = useCallback((battle: Battle) => {
     setDetailBattle(battle);
@@ -862,29 +923,37 @@ export default function BattlesScreen() {
     setAcceptBattle(b);
   }, []);
 
-  function canVoteOnBattle(battle: Battle): boolean {
-    const status = getBattleStatus(battle);
-    return (
-      status === "live" &&
+  // PERF: memoized, because renderBattleRow depends on these. As plain function
+  // declarations they got a fresh identity every render, which invalidated
+  // renderBattleRow and defeated the memoized row components underneath it.
+  //
+  // The eligibility rules themselves are unchanged: live, not already voted,
+  // signed in, matched, and not one of the two competitors.
+  const canVoteOnBattle = useCallback(
+    (battle: Battle): boolean =>
+      getBattleStatus(battle) === "live" &&
       !votedMap.has(battle.id) &&
       !!userId &&
       !!battle.playerB &&
       battle.playerA?.userId !== userId &&
-      battle.playerB?.userId !== userId
-    );
-  }
+      battle.playerB?.userId !== userId,
+    [votedMap, userId]
+  );
 
-  function canSkipBattle(battle: Battle): boolean {
-    if (getBattleStatus(battle) !== "live") return false;
-    return (
-      getNextVotableBattle({
-        battles: battlesRef.current,
-        currentBattleId: battle.id,
-        currentUserId: userId,
-        votedMap: votedMapRef.current,
-      }) !== null
-    );
-  }
+  const canSkipBattle = useCallback(
+    (battle: Battle): boolean => {
+      if (getBattleStatus(battle) !== "live") return false;
+      return (
+        getNextVotableBattle({
+          battles: battlesRef.current,
+          currentBattleId: battle.id,
+          currentUserId: userId,
+          votedMap: votedMapRef.current,
+        }) !== null
+      );
+    },
+    [userId]
+  );
 
   // Vote, then advance to the next votable live battle (or show "all caught up")
   const handleVoteWithAdvance = useCallback(
@@ -935,7 +1004,7 @@ export default function BattlesScreen() {
         setDetailBattle(next);
       } else {
         setDetailBattle(null);
-        Alert.alert("All caught up! 🎉", "You've voted on all available live battles.");
+        showAlert("All caught up! 🎉", "You've voted on all available live battles.");
       }
 
       votingBattleRef.current = null;
@@ -956,14 +1025,42 @@ export default function BattlesScreen() {
         setDetailBattle(next);
       } else {
         setDetailBattle(null);
-        Alert.alert("All caught up! 🎉", "No more votable battles right now.");
+        showAlert("All caught up! 🎉", "No more votable battles right now.");
       }
     },
     [userId]
   );
 
+  // ── Share (cross-platform, with clipboard fallback) ────────────────────────
+  const shareLive = useCallback((battle: Battle) => {
+    void shareBattle(battle);
+  }, []);
+  const shareResult = useCallback((battle: Battle) => {
+    void shareBattleResult(battle);
+  }, []);
+
+  const openAthlete = useCallback(
+    (targetUserId: string) => openAthleteProfile(router, targetUserId, userId),
+    [router, userId]
+  );
+
+  const goToFeed = useCallback(() => router.push("/(tabs)" as never), [router]);
+
+  const renderRailCard = useCallback(
+    ({ item }: { item: Battle }) => (
+      <View style={styles.railItem}>
+        <BattleRowCard
+          battle={item}
+          onPress={() => openDetail(item)}
+          currentUserId={userId}
+        />
+      </View>
+    ),
+    [openDetail, userId]
+  );
+
   const renderBattleRow = useCallback(
-    ({ item, index }: { item: ListRow; index: number }) => {
+    ({ item }: { item: ListRow }) => {
       if (item.type === "header") {
         return (
           <View style={styles.groupHeader} accessibilityRole="header">
@@ -975,50 +1072,92 @@ export default function BattlesScreen() {
         );
       }
 
-      if (item.type === "compact") {
+      if (item.type === "featured") {
         return (
-          <View
-            style={[
-              styles.moreBattleRow,
-              index === listRows.length - 1 && styles.moreBattleRowLast,
-            ]}
-          >
-            <BattleRowCard
-              battle={item.battle}
-              onPress={() => openDetail(item.battle)}
-              currentUserId={userId}
-            />
-          </View>
+          <FeaturedBattle
+            battle={item.battle}
+            userVote={votedMap.get(item.battle.id) ?? null}
+            canVote={canVoteOnBattle(item.battle)}
+            onVote={handleVoteWithAdvance}
+            onOpen={openDetail}
+            onOpenAthlete={openAthlete}
+            onShare={shareLive}
+            onSkip={
+              canSkipBattle(item.battle)
+                ? () => handleSkipBattle(item.battle.id)
+                : undefined
+            }
+          />
         );
       }
 
-      const battle = item.battle;
+      if (item.type === "rail") {
+        return (
+          <FlatList
+            horizontal
+            data={item.battles}
+            keyExtractor={railKey}
+            renderItem={renderRailCard}
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.rail}
+            initialNumToRender={2}
+            maxToRenderPerBatch={2}
+            windowSize={3}
+          />
+        );
+      }
+
+      if (item.type === "challenge") {
+        return (
+          <OpenChallengeRow
+            battle={item.battle}
+            onAccept={openAccept}
+            onOpen={openDetail}
+            onOpenAthlete={openAthlete}
+            // Firestore rules forbid the creator from accepting their own
+            // challenge, so the button is replaced with a "yours" state.
+            canAccept={!!userId && item.battle.creatorId !== userId}
+          />
+        );
+      }
+
+      if (item.type === "active") {
+        return (
+          <ActiveBattleRow
+            battle={item.battle}
+            viewerUserId={userId}
+            onOpen={openDetail}
+            onOpenAthlete={openAthlete}
+            onShare={shareLive}
+          />
+        );
+      }
+
       return (
-        <View>
-          <Pressable onPress={() => openDetail(battle)} accessible={false}>
-            <BattleCard
-              battle={battle}
-              userVote={votedMap.get(battle.id) ?? null}
-              onVote={handleVoteWithAdvance}
-              onAccept={openAccept}
-              currentUserId={userId}
-              featured={index === 0}
-            />
-          </Pressable>
-          <Pressable
-            style={({ pressed }) => [styles.viewBattleBtn, pressed && { opacity: 0.75 }]}
-            onPress={() => openDetail(battle)}
-            accessibilityRole="button"
-            accessibilityLabel={`View battle between ${battle.playerA?.username ?? "an athlete"} and ${
-              battle.playerB?.username ?? "an open slot"
-            }`}
-          >
-            <Text style={styles.viewBattleBtnText}>View Battle →</Text>
-          </Pressable>
-        </View>
+        <BattleResultCard
+          battle={item.battle}
+          onOpen={openDetail}
+          onOpenAthlete={openAthlete}
+          onShare={shareResult}
+          viewerUserId={activeTab === "mine" ? userId : null}
+        />
       );
     },
-    [handleVoteWithAdvance, listRows.length, openAccept, openDetail, userId, votedMap]
+    [
+      activeTab,
+      canSkipBattle,
+      canVoteOnBattle,
+      handleSkipBattle,
+      handleVoteWithAdvance,
+      openAccept,
+      openAthlete,
+      openDetail,
+      renderRailCard,
+      shareLive,
+      shareResult,
+      userId,
+      votedMap,
+    ]
   );
 
   const tabDefs = useMemo<{ key: Tab; label: string }[]>(
@@ -1122,105 +1261,115 @@ export default function BattlesScreen() {
           <RefreshControl refreshing={refreshing} onRefresh={manualRefresh} tintColor={COLORS.accent} />
         }
         contentContainerStyle={
-          filtered.length === 0 ? { flex: 1 } : { paddingBottom: SPACING.xxxl }
+          listRows.length === 0
+            ? { flexGrow: 1 }
+            : { paddingBottom: SPACING.xxxl, paddingTop: SPACING.sm }
         }
         renderItem={renderBattleRow}
         ListHeaderComponent={
-          showHeroSplit ? (
-            <>
-              {/* Hero battle card — tapping opens detail */}
-              <View style={styles.heroSection}>
-                {/* Roleless pressable wrapper — renders a <div> on web so the
-                    buttons inside BattleCard stay valid. */}
-                <Pressable
-                  onPress={() => openDetail(heroBattle!)}
-                  style={{ flex: 1 }}
-                  accessible={false}
-                >
-                  <BattleCard
-                    battle={heroBattle!}
-                    userVote={votedMap.get(heroBattle!.id) ?? null}
-                    onVote={handleVoteWithAdvance}
-                    onAccept={openAccept}
-                    currentUserId={userId}
-                    featured
-                    autoPlayMedia={heroMediaReady}
-                  />
-                </Pressable>
-                {/* Quick actions below hero */}
-                <View style={styles.heroActions}>
-                  <Pressable
-                    style={({ pressed }) => [
-                      styles.viewBattleBtn,
-                      styles.heroActionBtn,
-                      pressed && { opacity: 0.75 },
-                    ]}
-                    onPress={() => openDetail(heroBattle!)}
-                    accessibilityRole="button"
-                    accessibilityLabel={`View battle between ${heroBattle!.playerA?.username ?? "an athlete"} and ${
-                      heroBattle!.playerB?.username ?? "an open slot"
-                    }`}
-                  >
-                    <Text style={styles.viewBattleBtnText}>View Battle →</Text>
-                  </Pressable>
-                  {(canVoteOnBattle(heroBattle!) || canSkipBattle(heroBattle!)) && (
-                    <Pressable
-                      style={({ pressed }) => [
-                        styles.viewBattleBtn,
-                        styles.heroActionBtn,
-                        styles.skipBattleBtn,
-                        pressed && { opacity: 0.75 },
-                      ]}
-                      onPress={() => handleSkipBattle(heroBattle!.id)}
-                      accessibilityRole="button"
-                      accessibilityLabel="Skip to next battle"
-                    >
-                      <Text style={styles.viewBattleBtnText}>Skip →</Text>
-                    </Pressable>
-                  )}
-                </View>
-              </View>
-
-              {/* "More Battles" section — each row opens detail */}
-              {moreBattles.length > 0 && (
-                <View style={styles.moreBattlesSectionHeader}>
-                  <View style={styles.moreBattlesHeader}>
-                    <Text style={styles.moreBattlesTitle}>More Battles</Text>
-                    <Text style={styles.moreBattlesCount}>{moreBattles.length} more</Text>
-                  </View>
-                </View>
-              )}
-            </>
-          ) : filtered.length > 0 ? (
-            <View style={{ height: SPACING.md }} />
+          activeTab === "mine" ? (
+            <View style={styles.mineFilterRow}>
+              <Chip
+                label="All"
+                selected={mineFilter === "all"}
+                onPress={() => setMineFilter("all")}
+              />
+              <Chip
+                label={`Active${myActive.length ? ` (${myActive.length})` : ""}`}
+                selected={mineFilter === "active"}
+                onPress={() => setMineFilter("active")}
+              />
+              <Chip
+                label={`Challenges Sent${myChallengesSent.length ? ` (${myChallengesSent.length})` : ""}`}
+                selected={mineFilter === "sent"}
+                onPress={() => setMineFilter("sent")}
+              />
+              <Chip
+                label={`Completed${myCompleted.length ? ` (${myCompleted.length})` : ""}`}
+                selected={mineFilter === "completed"}
+                onPress={() => setMineFilter("completed")}
+              />
+            </View>
           ) : null
         }
         ListEmptyComponent={
-          filtered.length === 0 ? (
-            activeTab === "live" ? (
+          activeTab === "live" ? (
+            /* Live is never a blank black screen: when there is nothing to vote
+               on, it becomes a launchpad. Every action below is real — Start a
+               Battle opens the feed (challenges begin from a highlight), and
+               Recent Results switches to a tab that already has content. */
+            <View style={styles.liveEmpty}>
               <EmptyState
                 icon="⚔️"
                 title="No live battles right now"
-                subtitle="Challenge an athlete from any highlight and be the first matchup."
-                actionLabel="Find a highlight to challenge"
-                onAction={() => router.push("/(tabs)" as never)}
+                subtitle="Be the spark. Start a battle from one of your highlights, or accept an open challenge."
+                actionLabel="Start a Battle"
+                onAction={goToFeed}
               />
-            ) : activeTab === "mine" ? (
-              <EmptyState
-                icon="🥊"
-                title="You haven't battled yet"
-                subtitle="Open a challenge from one of your posts, or accept one from the Live tab."
-                actionLabel="See live battles"
-                onAction={() => setActiveTab("live")}
-              />
-            ) : (
-              <EmptyState
-                icon="🏆"
-                title="Your completed battles will appear here"
-                subtitle="When a battle's timer ends, the winner lands on this tab."
-              />
-            )
-          ) : null
+              {openChallenges.length > 0 && (
+                <Pressable
+                  onPress={() => setActiveTab("live")}
+                  accessibilityRole="button"
+                  accessibilityLabel={`See ${openChallenges.length} open challenges`}
+                  style={({ pressed }) => [
+                    styles.emptyLink,
+                    pressed && { opacity: 0.75 },
+                  ]}
+                >
+                  <Feather name="zap" size={14} color={COLORS.accent} />
+                  <Text style={styles.emptyLinkText}>
+                    {openChallenges.length} open{" "}
+                    {openChallenges.length === 1 ? "challenge" : "challenges"} waiting
+                  </Text>
+                </Pressable>
+              )}
+              {completed.length > 0 && (
+                <Pressable
+                  onPress={() => setActiveTab("completed")}
+                  accessibilityRole="button"
+                  accessibilityLabel="See recent results"
+                  style={({ pressed }) => [
+                    styles.emptyLink,
+                    pressed && { opacity: 0.75 },
+                  ]}
+                >
+                  <Feather name="award" size={14} color={COLORS.accent} />
+                  <Text style={styles.emptyLinkText}>
+                    See {completed.length} recent{" "}
+                    {completed.length === 1 ? "result" : "results"}
+                  </Text>
+                </Pressable>
+              )}
+            </View>
+          ) : activeTab === "mine" ? (
+            <EmptyState
+              icon="🥊"
+              title={
+                mineFilter === "all"
+                  ? "You haven't battled yet"
+                  : "Nothing in this filter"
+              }
+              subtitle={
+                mineFilter === "all"
+                  ? "Open a challenge from one of your highlights, or accept one from the Live tab."
+                  : "Try another filter, or head to Live to find a battle."
+              }
+              actionLabel={mineFilter === "all" ? "See live battles" : "Show all"}
+              onAction={
+                mineFilter === "all"
+                  ? () => setActiveTab("live")
+                  : () => setMineFilter("all")
+              }
+            />
+          ) : (
+            <EmptyState
+              icon="🏆"
+              title="No results yet"
+              subtitle="When a matched battle's timer ends, the winner lands on this tab."
+              actionLabel="See live battles"
+              onAction={() => setActiveTab("live")}
+            />
+          )
         }
       />
 
@@ -1254,6 +1403,44 @@ export default function BattlesScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: COLORS.background },
+
+  // ── Trending rail ──────────────────────────────────────────────────────────
+  rail: {
+    flexDirection: "row",
+    gap: SPACING.sm,
+    paddingHorizontal: SPACING.lg,
+    paddingBottom: SPACING.sm,
+  },
+  railItem: { width: 280 },
+
+  // ── My Battles filters ─────────────────────────────────────────────────────
+  mineFilterRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: SPACING.sm,
+    paddingHorizontal: SPACING.lg,
+    paddingBottom: SPACING.md,
+  },
+
+  // ── Live empty state ───────────────────────────────────────────────────────
+  liveEmpty: { flexGrow: 1, justifyContent: "center", gap: SPACING.sm },
+  emptyLink: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: SPACING.sm,
+    marginHorizontal: SPACING.xl,
+    minHeight: 46,
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: COLORS.accentBorderFaint,
+    backgroundColor: COLORS.accentFaint,
+  },
+  emptyLinkText: {
+    color: COLORS.accent,
+    fontSize: 13,
+    fontWeight: FONTS.bold,
+  },
 
   // Header
   header: {
@@ -1321,85 +1508,8 @@ const styles = StyleSheet.create({
   },
 
   // Hero section
-  heroSection: {
-    paddingTop: SPACING.lg,
-  },
-  heroActions: {
-    flexDirection: "row",
-    justifyContent: "center",
-    gap: SPACING.sm,
-    marginTop: -SPACING.sm,
-    marginBottom: SPACING.lg,
-  },
-  heroActionBtn: {
-    marginTop: 0,
-    marginBottom: 0,
-  },
-  skipBattleBtn: {
-    borderColor: COLORS.inputBorder,
-    backgroundColor: COLORS.surface,
-  },
 
   // "View Battle" pill button below each card
-  viewBattleBtn: {
-    alignSelf: "center",
-    marginTop: -SPACING.sm,
-    marginBottom: SPACING.lg,
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.xs + 2,
-    borderRadius: RADIUS.full,
-    borderWidth: 1,
-    borderColor: COLORS.accent,
-    backgroundColor: COLORS.accentFaint,
-  },
-  viewBattleBtnText: {
-    color: COLORS.accent,
-    fontSize: 12,
-    fontWeight: FONTS.bold,
-    letterSpacing: 0.3,
-  },
 
   // More Battles
-  moreBattlesSectionHeader: {
-    backgroundColor: COLORS.card,
-    marginHorizontal: SPACING.lg,
-    marginTop: SPACING.sm,
-    borderTopLeftRadius: RADIUS.xl,
-    borderTopRightRadius: RADIUS.xl,
-    borderWidth: 1,
-    borderBottomWidth: 0,
-    borderColor: COLORS.cardBorder,
-    overflow: "hidden",
-  },
-  moreBattleRow: {
-    backgroundColor: COLORS.card,
-    marginHorizontal: SPACING.lg,
-    borderLeftWidth: 1,
-    borderRightWidth: 1,
-    borderColor: COLORS.cardBorder,
-  },
-  moreBattleRowLast: {
-    borderBottomWidth: 1,
-    borderBottomLeftRadius: RADIUS.xl,
-    borderBottomRightRadius: RADIUS.xl,
-    overflow: "hidden",
-    marginBottom: SPACING.xl,
-  },
-  moreBattlesHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.md,
-  },
-  moreBattlesTitle: {
-    color: COLORS.textPrimary,
-    fontSize: 16,
-    fontWeight: FONTS.heavy,
-  },
-  moreBattlesCount: {
-    color: COLORS.textMuted,
-    fontSize: 12,
-    fontWeight: FONTS.semibold,
-  },
 });

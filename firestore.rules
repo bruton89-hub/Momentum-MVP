@@ -48,10 +48,31 @@ service cloud.firestore {
       allow create, update, delete: if false;
     }
 
+    // ─── Saves (bookmarks) ─────────────────────────────────────────────────────
+    // Doc ID convention: saves/{postId}_{userId} — compound key makes a save
+    // idempotent and lets these rules verify ownership from the ID itself.
+    //
+    // PRIVATE: unlike likes, a save is only ever readable by the athlete who
+    // made it. Nobody can enumerate another user's bookmarks. The owner writes
+    // and deletes their own; no counters exist, so no server involvement.
+    match /saves/{saveId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.postId is string
+        && request.resource.data.postId.size() > 0
+        && saveId == request.resource.data.postId + '_' + request.auth.uid;
+      // Immutable — a save is toggled by delete + create, never edited.
+      allow update: if false;
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
     // ─── Battles ───────────────────────────────────────────────────────────────
-    // status="completed", winner, and statsRecorded are SERVER-ONLY. They are
-    // written only by the `finalizeBattle` Cloud Function (Admin SDK). Clients
-    // may ONLY:
+    // status="completed", status="expired", winner, and statsRecorded are
+    // SERVER-ONLY. They are written only by the `finalizeBattle` Cloud Function
+    // (Admin SDK). "expired" means the challenge window closed with no opponent
+    // — it is not a contest, records no stats, and is hidden from every list.
+    // Clients may ONLY:
     //   1. Create a battle they own.
     //   2. Accept an open challenge (set playerB and flip status open → live).
       // Vote counters are written only by the castBattleVote callable.

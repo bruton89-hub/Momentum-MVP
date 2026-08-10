@@ -41,6 +41,18 @@ service cloud.firestore {
       allow create, update, delete: if false;
     }
 
+    // Saves are private to their owner — no counters, so no server involvement.
+    match /saves/{saveId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.postId is string
+        && request.resource.data.postId.size() > 0
+        && saveId == request.resource.data.postId + '_' + request.auth.uid;
+      allow update: if false;
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
     match /battles/{battleId} {
       allow read: if isSignedIn();
       allow create: if isSignedIn()

@@ -20,11 +20,22 @@ import {
   fetchPostsByUser,
   fetchPostsByUsers,
   normalizePost,
-  timestampToMs,
 } from "@/services/postRepository";
-import type { Post } from "@/types";
+import { createFeedSeed, rankFeed, viewerContextFrom } from "@/services/feedRanking";
+import { invalidateDiscoverPool } from "@/services/discoverRepository";
+import type { Post, UserProfile } from "@/types";
 import type { PostVideoEdit } from "@/constants/videoEditing";
 import { startDevTimer } from "@/utils/performance";
+import {
+  loadMediaBlob,
+  mediaSourceMimeType,
+  mediaSourceUri,
+  type MediaUploadSource,
+} from "@/utils/mediaUpload";
+import {
+  excludeDeletedPosts,
+  subscribeToPostDeletions,
+} from "@/services/postDeletion";
 
 const POSTS_PER_PAGE = 20;
 const DISCOVERY_INITIAL_LIMIT = 24;
@@ -37,12 +48,53 @@ function feedCacheKey(userId?: string | null): string {
   return `${FEED_CACHE_PREFIX}:${userId || "guest"}`;
 }
 
+// ─── Feed freshness ───────────────────────────────────────────────────────────
+// Home used to re-fetch on EVERY focus: up to 80 post documents plus the
+// follows list, every time you came back from Profile, Battles, or a modal.
+// That was deliberate — it's how a highlight you just published appears after
+// router.replace("/") — but it made routine tab-switching cost a network round
+// trip and a visible refresh spinner.
+//
+// Focus now refreshes only when the pool is actually stale: either the TTL has
+// elapsed, or something changed the pool. `invalidateFeeds()` is called on
+// publish, so publishing still lands you on a feed containing your new post.
+// Pull-to-refresh is unaffected and always forces a real fetch.
+//
+// A generation counter rather than a boolean, because For You and Following
+// read the signal independently — a boolean let whichever refreshed first
+// consume the invalidation and leave the other showing stale data.
+const FEED_FRESHNESS_MS = 60_000;
+let feedGeneration = 0;
+
+export function invalidateFeeds(): void {
+  feedGeneration += 1;
+}
+
+/** Tracks whether a given feed consumer has seen the latest generation. */
+function useFeedFreshness() {
+  const lastGenerationRef = useRef(-1);
+  const lastFetchedAtRef = useRef(0);
+
+  const isStale = useCallback(
+    () =>
+      lastGenerationRef.current !== feedGeneration ||
+      Date.now() - lastFetchedAtRef.current > FEED_FRESHNESS_MS,
+    []
+  );
+  const markFresh = useCallback(() => {
+    lastGenerationRef.current = feedGeneration;
+    lastFetchedAtRef.current = Date.now();
+  }, []);
+
+  return { isStale, markFresh };
+}
+
 function renderablePosts(posts: Post[]): Post[] {
   const unique = new Map<string, Post>();
   posts.forEach((post) => {
     if (post.mediaUrl && !unique.has(post.id)) unique.set(post.id, post);
   });
-  return Array.from(unique.values());
+  return excludeDeletedPosts(Array.from(unique.values()));
 }
 
 async function readCachedFeed(userId?: string | null): Promise<Post[]> {
@@ -74,73 +126,10 @@ function writeCachedFeed(
   ).catch(() => undefined);
 }
 
-function seededUnit(seed: number, value: string): number {
-  let hash = seed ^ 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0) / 4294967296;
-}
-
-function createDiscoverySeed(): number {
-  return Math.floor(Math.random() * 2147483647);
-}
-
-function rankDiscoveryPosts(
-  posts: Post[],
-  seed: number,
-  currentUserId: string | null | undefined,
-  followedIds: Set<string>
-): Post[] {
-  const timestamps = posts.map((post) => timestampToMs(post.createdAt));
-  const newestTimestamp = Math.max(...timestamps, 1);
-  const oldestTimestamp = Math.min(...timestamps, newestTimestamp);
-  const timestampSpan = Math.max(1, newestTimestamp - oldestTimestamp);
-  const candidates = posts.map((post) => {
-    const recency =
-      (timestampToMs(post.createdAt) - oldestTimestamp) / timestampSpan;
-    const lowVisibility = 1 / Math.sqrt(Math.max(0, post.likesCount) + 1);
-    const unfamiliarAthlete =
-      post.userId !== currentUserId && !followedIds.has(post.userId) ? 1 : 0;
-
-    return {
-      post,
-      score:
-        seededUnit(seed, post.id) * 0.45 +
-        recency * 0.25 +
-        lowVisibility * 0.2 +
-        unfamiliarAthlete * 0.1,
-    };
-  });
-  const ranked: Post[] = [];
-  const authorCounts = new Map<string, number>();
-
-  // Seeded scoring keeps the order stable for the session. The author penalty
-  // prevents prolific athletes from filling consecutive discovery slots.
-  while (candidates.length > 0) {
-    let bestIndex = 0;
-    let bestAdjustedScore = Number.NEGATIVE_INFINITY;
-    candidates.forEach((candidate, index) => {
-      const authorCount = authorCounts.get(candidate.post.userId) ?? 0;
-      const repeatsPreviousAuthor =
-        ranked[ranked.length - 1]?.userId === candidate.post.userId;
-      const adjustedScore =
-        candidate.score -
-        authorCount * 0.16 -
-        (repeatsPreviousAuthor ? 0.35 : 0);
-      if (adjustedScore > bestAdjustedScore) {
-        bestAdjustedScore = adjustedScore;
-        bestIndex = index;
-      }
-    });
-    const [{ post }] = candidates.splice(bestIndex, 1);
-    ranked.push(post);
-    authorCounts.set(post.userId, (authorCounts.get(post.userId) ?? 0) + 1);
-  }
-
-  return ranked;
-}
+// Ranking lives in services/feedRanking.ts. The previous inline model was
+// dominated by a 0.45-weight random term, which meant the feed was mostly
+// shuffle: a great new highlight and a stale one had near-identical odds, and
+// nothing about the viewer mattered. See docs/feed-ranking.md.
 
 type SetPostLikeResult = {
   postId: string;
@@ -157,12 +146,14 @@ const setPostLikeCallable = httpsCallable<
 // ─── Upload media to Firebase Storage ────────────────────────────────────────
 
 export async function uploadMedia(
-  uri: string,
+  source: MediaUploadSource,
   userId: string,
   onProgress?: (pct: number) => void
 ): Promise<string> {
-  return (await uploadMediaWithPath(uri, userId, onProgress)).url;
+  return (await uploadMediaWithPath(source, userId, onProgress)).url;
 }
+
+export type { MediaUploadSource } from "@/utils/mediaUpload";
 
 export interface UploadedMedia {
   url: string;
@@ -170,17 +161,35 @@ export interface UploadedMedia {
 }
 
 export async function uploadMediaWithPath(
-  uri: string,
+  source: MediaUploadSource,
   userId: string,
   onProgress?: (pct: number) => void,
   filenamePrefix = "post"
 ): Promise<UploadedMedia> {
-  const blob = await uriToBlob(uri);
+  const uri = mediaSourceUri(source);
+  const declaredMimeType = mediaSourceMimeType(source);
+  const originalFileName =
+    typeof source === "string" ? null : source.fileName?.trim() || null;
+
+  let blob: Blob;
+  try {
+    blob = await loadMediaBlob(source, Platform.OS);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "Unknown file read error.";
+    throw new Error(`Selected media could not be read. ${detail}`);
+  }
   if (blob.size > MAX_POST_MEDIA_BYTES) {
     throw new Error("Media must be 50 MB or smaller.");
   }
+  if (blob.size === 0) {
+    throw new Error("Selected media is empty. Choose the file again and retry.");
+  }
 
-  const ext = extensionFromBlob(blob) || extensionFromUri(uri) || "jpg";
+  const ext =
+    extensionFromBlob(blob) ||
+    (originalFileName ? extensionFromUri(originalFileName) : null) ||
+    extensionFromUri(uri) ||
+    (declaredMimeType?.startsWith("video/") ? "mp4" : "jpg");
   const filename = `posts/${userId}/${filenamePrefix}_${Date.now()}.${ext}`;
   const storageRef = ref(storage, filename);
 
@@ -197,7 +206,8 @@ export async function uploadMediaWithPath(
       },
       (err) => {
         console.error("[uploadMedia] uploadBytes error", err);
-        reject(err);
+        const code = typeof err?.code === "string" ? ` (${err.code})` : "";
+        reject(new Error(`Firebase Storage upload failed${code}. ${err.message || "Check your connection and try again."}`));
       },
       async () => {
         try {
@@ -206,33 +216,11 @@ export async function uploadMediaWithPath(
           resolve({ url, fullPath: task.snapshot.ref.fullPath });
         } catch (err) {
           console.error("[uploadMedia] getDownloadURL error", err);
-          reject(err);
+          const detail = err instanceof Error ? err.message : "Unknown download URL error.";
+          reject(new Error(`Upload finished, but its download URL could not be retrieved. ${detail}`));
         }
       }
     );
-  });
-}
-
-async function uriToBlob(uri: string): Promise<Blob> {
-  if (Platform.OS === "web" || uri.startsWith("http") || uri.startsWith("blob:") || uri.startsWith("data:")) {
-    const response = await fetch(uri);
-    if (!response.ok) {
-      throw new Error(`Media fetch failed with status ${response.status}`);
-    }
-    return response.blob();
-  }
-
-  return new Promise<Blob>((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.onload = () => {
-      resolve(xhr.response as Blob);
-    };
-    xhr.onerror = () => {
-      reject(new Error("Could not read selected media file."));
-    };
-    xhr.responseType = "blob";
-    xhr.open("GET", uri, true);
-    xhr.send(null);
   });
 }
 
@@ -309,6 +297,12 @@ export async function createPost(input: CreatePostInput): Promise<string> {
     updatedAt: Timestamp.now(),
   };
   const docRef = await addDoc(collection(db, "posts"), payload);
+  // The pool just changed — the next Home focus must re-fetch rather than serve
+  // a cached page that is missing the highlight this athlete just published.
+  // Discover derives all of its rails from its own cached pool, so that has to
+  // be dropped too or a new highlight can't appear there either.
+  invalidateFeeds();
+  invalidateDiscoverPool();
 
   return docRef.id;
 }
@@ -351,7 +345,10 @@ export async function fetchLikedPostIds(
 
 export function usePosts(
   currentUserId?: string | null,
-  followedIds: Set<string> = new Set()
+  followedIds: Set<string> = new Set(),
+  /** Viewer profile — drives the relevance term. Optional; ranking degrades
+   *  gracefully to recency + engagement when it's absent. */
+  viewerProfile?: UserProfile | null
 ) {
   const [posts, setPosts] = useState<Post[]>([]);
   const [visibleCount, setVisibleCount] = useState(DISCOVERY_PAGE_SIZE);
@@ -359,11 +356,33 @@ export function usePosts(
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const discoverySeedRef = useRef(createDiscoverySeed());
+  const discoverySeedRef = useRef(createFeedSeed());
   const postsRef = useRef<Post[]>([]);
   const requestIdRef = useRef(0);
   const followedIdsRef = useRef(followedIds);
   followedIdsRef.current = followedIds;
+  // Read through a ref so a profile hydrating after mount doesn't rebuild
+  // fetchPosts and retrigger the whole feed load.
+  const viewerProfileRef = useRef(viewerProfile);
+  viewerProfileRef.current = viewerProfile;
+  const { isStale, markFresh } = useFeedFreshness();
+
+  useEffect(
+    () =>
+      subscribeToPostDeletions((postId) => {
+        const remaining = postsRef.current.filter((post) => post.id !== postId);
+        postsRef.current = remaining;
+        setPosts(remaining);
+        setLikedIds((previous) => {
+          if (!previous.has(postId)) return previous;
+          const next = new Set(previous);
+          next.delete(postId);
+          return next;
+        });
+        void writeCachedFeed(remaining, currentUserId);
+      }),
+    [currentUserId]
+  );
 
   const fetchPosts = useCallback(async (isRefresh = false) => {
     const requestId = ++requestIdRef.current;
@@ -386,19 +405,26 @@ export function usePosts(
         .map((d) => normalizePost(d.id, d.data() as Record<string, unknown>))
       );
 
-      if (isRefresh) discoverySeedRef.current = createDiscoverySeed();
+      // A fresh seed per pull-to-refresh: the jitter term is the only thing
+      // that changes, so the feed visibly moves without the ranking flipping.
+      if (isRefresh) discoverySeedRef.current = createFeedSeed();
 
-      const rankedInitial = rankDiscoveryPosts(
-        initialPosts,
-        discoverySeedRef.current,
+      const viewer = viewerContextFrom(
         currentUserId,
+        viewerProfileRef.current,
         followedIdsRef.current
+      );
+      const rankedInitial = rankFeed(
+        initialPosts,
+        viewer,
+        discoverySeedRef.current
       );
       postsRef.current = rankedInitial;
       setPosts(rankedInitial);
       setVisibleCount(DISCOVERY_INITIAL_LIMIT);
       setLoading(false);
       setRefreshing(false);
+      markFresh();
       void writeCachedFeed(rankedInitial, currentUserId);
 
       // Likes are presentation metadata; never hold the first feed paint for them.
@@ -436,11 +462,17 @@ export function usePosts(
                 )
               )
             ).filter((post) => !existingIds.has(post.id));
-            const rankedAdditional = rankDiscoveryPosts(
+            // Ranked as its own block and appended, never re-ranked with the
+            // first page: reordering posts the athlete may already be looking
+            // at would move content under their thumb mid-scroll.
+            const rankedAdditional = rankFeed(
               additional,
-              discoverySeedRef.current,
-              currentUserId,
-              followedIdsRef.current
+              viewerContextFrom(
+                currentUserId,
+                viewerProfileRef.current,
+                followedIdsRef.current
+              ),
+              discoverySeedRef.current
             );
             const expanded = [...rankedInitial, ...rankedAdditional];
             postsRef.current = expanded;
@@ -477,7 +509,7 @@ export function usePosts(
         setRefreshing(false);
       }
     }
-  }, [currentUserId]);
+  }, [currentUserId, markFresh]);
 
   useEffect(() => {
     let cancelled = false;
@@ -575,6 +607,12 @@ export function usePosts(
   // Stable refresh reference — wrapped so its identity only changes when
   // fetchPosts itself changes (i.e. when currentUserId changes), not every render.
   const refresh = useCallback(() => fetchPosts(true), [fetchPosts]);
+  // Focus-time refresh. Skips the network entirely when the pool is still fresh
+  // and nothing has published since the last fetch.
+  const refreshIfStale = useCallback(() => {
+    if (!isStale()) return;
+    void fetchPosts(true);
+  }, [fetchPosts, isStale]);
   const loadMore = useCallback(() => {
     setVisibleCount((count) =>
       Math.min(count + DISCOVERY_PAGE_SIZE, posts.length)
@@ -599,6 +637,7 @@ export function usePosts(
     refreshing,
     error,
     refresh,
+    refreshIfStale,
     loadMore,
     hasMore: visibleCount < posts.length,
     handleLike,
@@ -606,18 +645,28 @@ export function usePosts(
 }
 
 // ─── Hook: posts by a specific user ──────────────────────────────────────────
-// Queries all three known userId field aliases (userId, authorId, uid) in
-// parallel so that both old docs (that only stored authorId) and new docs
-// (that always store userId) appear on the profile grid.
+// Author lookup lives in services/postRepository.ts. By default it queries all
+// three known userId aliases (userId, authorId, uid) in parallel so legacy docs
+// that stored only authorId still reach the profile grid — at the cost of
+// returning every modern doc three times, and of sorting client-side over an
+// arbitrary page rather than ordering in the query.
 //
-// IMPORTANT: Do NOT use orderBy("createdAt") alongside where("userId","==").
-// That compound query requires a Firestore composite index.  Without one,
-// Firestore returns FAILED_PRECONDITION.  We sort client-side instead.
+// The composite index this needs (posts: userId ASC, createdAt DESC) IS
+// deployed in firestore.indexes.json — an earlier note here claiming otherwise
+// was stale. After running scripts/backfill-post-user-id.js, setting
+// EXPO_PUBLIC_POSTS_USERID_BACKFILLED=true collapses this to one ordered query.
 
 export function useUserPosts(userId: string | null) {
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(false);
   const requestIdRef = useRef(0);
+
+  useEffect(
+    () => subscribeToPostDeletions((postId) => {
+      setPosts((current) => current.filter((post) => post.id !== postId));
+    }),
+    []
+  );
 
   const load = useCallback(async () => {
     const requestId = ++requestIdRef.current;
@@ -630,7 +679,9 @@ export function useUserPosts(userId: string | null) {
     const stopTimer = startDevTimer(`posts for user ${userId}`);
     try {
       const normalized = await fetchPostsByUser(userId);
-      if (requestId === requestIdRef.current) setPosts(normalized);
+      if (requestId === requestIdRef.current) {
+        setPosts(excludeDeletedPosts(normalized));
+      }
     } catch (err) {
       console.error("[fetchUserPosts] query failed:", err);
       if (requestId === requestIdRef.current) setPosts([]);
@@ -666,6 +717,14 @@ export function useFollowingPosts(
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const fetchInFlightRef = useRef(false);
+  const { isStale, markFresh } = useFeedFreshness();
+
+  useEffect(
+    () => subscribeToPostDeletions((postId) => {
+      setPosts((current) => current.filter((post) => post.id !== postId));
+    }),
+    []
+  );
 
   // Serialize followedIds to a stable string so the callback only recreates
   // when the actual set of followed IDs changes, not just the Set reference.
@@ -702,7 +761,8 @@ export function useFollowingPosts(
 
         // Replace results. Do not append: focus refreshes and followed-id changes
         // should never stack duplicate batches into existing feed state.
-        setPosts(unique);
+        setPosts(excludeDeletedPosts(unique));
+        markFresh();
       } catch (err) {
         // Surface the real error code so a FAILED_PRECONDITION (missing index)
         // or PERMISSION_DENIED isn't silently swallowed as an empty feed.
@@ -726,6 +786,10 @@ export function useFollowingPosts(
   // Stable refresh reference — wrapped so its identity only changes when
   // fetchPosts itself changes (i.e. when followedKey/followsLoading changes).
   const refresh = useCallback(() => fetchPosts(true), [fetchPosts]);
+  const refreshIfStale = useCallback(() => {
+    if (!isStale()) return;
+    void fetchPosts(true);
+  }, [fetchPosts, isStale]);
 
   return {
     posts,
@@ -733,5 +797,6 @@ export function useFollowingPosts(
     loading: followsLoading || loading,
     refreshing,
     refresh,
+    refreshIfStale,
   };
 }

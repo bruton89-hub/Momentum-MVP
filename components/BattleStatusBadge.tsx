@@ -5,11 +5,17 @@ import { COLORS, FONTS, RADIUS } from "@/constants/theme";
 
 /**
  * Derived battle status values that exist in this codebase.
- * Stored Firestore statuses are "open" | "live" | "completed";
- * getBattleStatus() additionally folds expiry into "completed".
+ * Stored Firestore statuses are "open" | "live" | "completed" | "expired";
+ * getBattleStatus() folds expiry into "completed" for MATCHED battles, and
+ * into "expired" for challenges nobody ever accepted.
  * Anything else renders through the "unknown" fallback — neutral and safe.
  */
-export type BattleStatusValue = "open" | "live" | "completed" | (string & {});
+export type BattleStatusValue =
+  | "open"
+  | "live"
+  | "completed"
+  | "expired"
+  | (string & {});
 
 interface Props {
   status: BattleStatusValue;
@@ -47,6 +53,19 @@ function configFor(status: BattleStatusValue): StatusConfig {
           <MaterialCommunityIcons name="trophy-outline" size={11} color={COLORS.warning} />
         ),
         a11y: "Battle completed",
+      };
+    // Expired challenges are filtered out of every list, so this badge should
+    // never render in normal use. It exists for deep links and for anything
+    // that reaches a battle document directly — better an honest label than
+    // the neutral "unknown" fallback.
+    case "expired":
+      return {
+        label: "EXPIRED",
+        color: COLORS.textMuted,
+        bg: COLORS.surface,
+        border: COLORS.inputBorder,
+        icon: <Feather name="clock" size={11} color={COLORS.textMuted} />,
+        a11y: "Challenge expired — no opponent accepted",
       };
     case "open":
       return {

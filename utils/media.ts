@@ -149,6 +149,18 @@ export function isValidMediaUrl(url: string | null | undefined): boolean {
   return true;
 }
 
+/**
+ * Returns true if the URI points at a remote resource that any device can load.
+ *
+ * Local picker URIs (`file://`, `content://`, `ph://`, `assets-library://`) are
+ * only resolvable on the device that produced them. Persisting one to Firestore
+ * produces media that renders for the author and is broken for everyone else,
+ * so every write path must gate on this before storing a URI.
+ */
+export function isRemoteUri(uri: string | null | undefined): boolean {
+  return typeof uri === "string" && /^https?:\/\//i.test(uri.trim());
+}
+
 export async function getVideoThumbnailUri(
   mediaUrl: string | null | undefined
 ): Promise<string> {

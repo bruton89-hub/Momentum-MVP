@@ -1,12 +1,16 @@
 import {
   collection,
+  documentId,
   getDocs,
   limit,
+  orderBy,
   query,
   Timestamp,
   where,
 } from "firebase/firestore";
 import { db } from "@/config/firebase";
+import { excludeDeletedPosts } from "@/services/postDeletion";
+import { isRemoteUri } from "@/utils/media";
 import type { Post } from "@/types";
 import type {
   PostVideoEdit,
@@ -16,6 +20,26 @@ import type {
 const AUTHOR_FIELDS = ["userId", "authorId", "uid"] as const;
 const FIRESTORE_IN_LIMIT = 10;
 const PROFILE_POST_LIMIT = 30;
+
+// ─── Author-field consolidation ──────────────────────────────────────────────
+// Every post `createPost` has ever written carries all three author aliases
+// (userId / authorId / uid), but posts predating that change may carry only
+// one. Querying all three in parallel is what kept legacy posts visible — at
+// the cost of returning, and being billed for, every modern doc three times.
+//
+// Once `scripts/backfill-post-user-id.js` has stamped `userId` onto every
+// legacy doc, that fan-out is pure waste: set
+// EXPO_PUBLIC_POSTS_USERID_BACKFILLED=true and each read collapses to a single
+// indexed query — ~66% fewer document reads on profile grids and the Following
+// feed, and one round trip instead of three (or of 3×N for the `in` batches).
+//
+// The consolidated path can also finally use orderBy("createdAt","desc"). The
+// three-alias path cannot: composite indexes exist for userId+createdAt only,
+// so the legacy path takes an arbitrary PROFILE_POST_LIMIT docs and sorts them
+// client-side — meaning an athlete with more than 30 posts sees an arbitrary
+// 30 rather than their 30 newest. Backfilling fixes that correctness bug too.
+const POSTS_USERID_BACKFILLED =
+  process.env.EXPO_PUBLIC_POSTS_USERID_BACKFILLED === "true";
 
 function stringValue(value: unknown): string {
   return typeof value === "string" && value.length > 0 ? value : "";
@@ -49,7 +73,13 @@ function normalizeVideoEdit(value: unknown): PostVideoEdit | undefined {
         ? ((edit.trimEnd ?? edit.trimEndSeconds) as number)
         : null,
     textOverlay: stringValue(edit.textOverlay),
-    coverUri: stringValue(edit.coverUri) || null,
+    // Only remote covers survive normalisation. Older builds persisted the
+    // local file:// URI straight from the device thumbnail cache, which
+    // resolves on the author's phone and nowhere else — every other viewer got
+    // a broken image. Dropping those here repairs legacy docs at read time.
+    coverUri: isRemoteUri(stringValue(edit.coverUri))
+      ? stringValue(edit.coverUri)
+      : null,
   };
 }
 
@@ -159,7 +189,33 @@ function deduplicateAndSort(posts: Post[]): Post[] {
   );
 }
 
+function postsFromSnapshots(
+  snapshots: { docs: { id: string; data: () => unknown }[] }[]
+): Post[] {
+  return deduplicateAndSort(
+    snapshots.flatMap((snapshot) =>
+      snapshot.docs.map((postDoc) =>
+        normalizePost(postDoc.id, postDoc.data() as Record<string, unknown>)
+      )
+    )
+  );
+}
+
 export async function fetchPostsByUser(userId: string): Promise<Post[]> {
+  if (POSTS_USERID_BACKFILLED) {
+    // One indexed query (posts: userId ASC, createdAt DESC) instead of three
+    // unordered scans — and genuinely the newest posts, not an arbitrary page.
+    const snapshot = await getDocs(
+      query(
+        collection(db, "posts"),
+        where("userId", "==", userId),
+        orderBy("createdAt", "desc"),
+        limit(PROFILE_POST_LIMIT)
+      )
+    );
+    return excludeDeletedPosts(postsFromSnapshots([snapshot]));
+  }
+
   const snapshots = await Promise.all(
     AUTHOR_FIELDS.map((field) =>
       getDocs(
@@ -172,7 +228,7 @@ export async function fetchPostsByUser(userId: string): Promise<Post[]> {
     )
   );
 
-  return deduplicateAndSort(
+  return excludeDeletedPosts(deduplicateAndSort(
     snapshots.flatMap((snapshot) =>
       snapshot.docs.map((postDoc) =>
         normalizePost(
@@ -181,7 +237,57 @@ export async function fetchPostsByUser(userId: string): Promise<Post[]> {
         )
       )
     )
+  ));
+}
+
+/**
+ * The newest posts, ordered by the server.
+ *
+ * One indexed query on a single collection — the same shape the Home feed
+ * already runs. Discover derives every one of its sections from this single
+ * result rather than issuing a query per rail.
+ */
+export async function fetchRecentPosts(max: number): Promise<Post[]> {
+  const snapshot = await getDocs(
+    query(
+      collection(db, "posts"),
+      orderBy("createdAt", "desc"),
+      limit(max)
+    )
   );
+  return excludeDeletedPosts(
+    snapshot.docs
+      .map((postDoc) =>
+        normalizePost(postDoc.id, postDoc.data() as Record<string, unknown>)
+      )
+      .filter((post) => !!post.mediaUrl)
+  );
+}
+
+/**
+ * Fetch posts by document id, batched to Firestore's 10-item `in` cap.
+ *
+ * Missing ids are simply absent from the result — a post deleted after it was
+ * saved or referenced shouldn't fail the whole read.
+ */
+export async function fetchPostsByIds(postIds: string[]): Promise<Post[]> {
+  const ids = Array.from(new Set(postIds.filter(Boolean)));
+  if (ids.length === 0) return [];
+
+  const batches: string[][] = [];
+  for (let index = 0; index < ids.length; index += FIRESTORE_IN_LIMIT) {
+    batches.push(ids.slice(index, index + FIRESTORE_IN_LIMIT));
+  }
+
+  const snapshots = await Promise.all(
+    batches.map((batch) =>
+      getDocs(
+        query(collection(db, "posts"), where(documentId(), "in", batch))
+      )
+    )
+  );
+
+  return excludeDeletedPosts(postsFromSnapshots(snapshots));
 }
 
 export async function fetchPostsByUsers(
@@ -194,6 +300,27 @@ export async function fetchPostsByUsers(
   const batches: string[][] = [];
   for (let index = 0; index < ids.length; index += FIRESTORE_IN_LIMIT) {
     batches.push(ids.slice(index, index + FIRESTORE_IN_LIMIT));
+  }
+
+  if (POSTS_USERID_BACKFILLED) {
+    // One query per batch of 10 authors instead of three, each returning that
+    // batch's newest posts rather than an arbitrary slice.
+    const snapshots = await Promise.all(
+      batches.map((batch) =>
+        getDocs(
+          query(
+            collection(db, "posts"),
+            where("userId", "in", batch),
+            orderBy("createdAt", "desc"),
+            limit(resultLimit)
+          )
+        )
+      )
+    );
+    return excludeDeletedPosts(postsFromSnapshots(snapshots)).slice(
+      0,
+      resultLimit
+    );
   }
 
   const snapshots = await Promise.all(
@@ -210,7 +337,7 @@ export async function fetchPostsByUsers(
     )
   );
 
-  return deduplicateAndSort(
+  return excludeDeletedPosts(deduplicateAndSort(
     snapshots.flatMap((snapshot) =>
       snapshot.docs.map((postDoc) =>
         normalizePost(
@@ -219,5 +346,5 @@ export async function fetchPostsByUsers(
         )
       )
     )
-  ).slice(0, resultLimit);
+  )).slice(0, resultLimit);
 }

@@ -17,8 +17,8 @@ import {
   StyleSheet,
   ScrollView,
   ActivityIndicator,
-  Alert,
 } from "react-native";
+import { showAlert, confirm } from "@/utils/alert";
 import { Feather } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { createLiveBattle } from "@/hooks/useBattles";
@@ -201,12 +201,12 @@ export default function BattlePickerModal({
 
       onBattleCreated();
       onClose();
-      Alert.alert(
+      showAlert(
         "Battle started! ⚔️",
         `You're now battling @${targetPost.username}. Head to Battles to vote.`
       );
     } catch {
-      Alert.alert("Failed", "Could not create battle. Please try again.");
+      showAlert("Failed", "Could not create battle. Please try again.");
       setSelectedPostId(null);
     } finally {
       creatingRef.current = false;

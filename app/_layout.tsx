@@ -61,6 +61,8 @@ export default function RootLayout() {
           <Stack.Screen name="(tabs)" options={{ animation: "fade" }} />
           {/* Dynamic player profile — matched by /profile/[userId] links in PostCard */}
           <Stack.Screen name="profile/[userId]" />
+          {/* Expanded Discover rails — the "See All" destinations */}
+          <Stack.Screen name="discover/[section]" />
         </Stack>
       </SafeAreaProvider>
     </GestureHandlerRootView>

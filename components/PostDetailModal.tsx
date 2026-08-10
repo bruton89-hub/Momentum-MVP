@@ -19,6 +19,7 @@ interface Props {
   isBattling?: boolean;
   isFollowing?: boolean;
   onFollow?: (userId: string, isCurrentlyFollowing: boolean) => void;
+  onDeleted?: (postId: string) => void;
 }
 const ignoreLike = () => undefined;
 const HEADER_HEIGHT = 52;
@@ -38,6 +39,7 @@ export default function PostDetailModal({
   isBattling = false,
   isFollowing,
   onFollow,
+  onDeleted,
 }: Props) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -113,6 +115,11 @@ export default function PostDetailModal({
               isActiveVideo={mediaReady}
               isActiveCard
               mountVideoPlayer={mediaReady}
+              onDeleted={(deletedPostId) => {
+                setCommentsOpen(false);
+                onDeleted?.(deletedPostId);
+                onClose?.();
+              }}
             />
           )}
         </View>

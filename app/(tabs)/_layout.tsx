@@ -75,6 +75,17 @@ function BattlesIcon({ focused }: { focused: boolean }) {
   );
 }
 
+/** Discover tab — magnifier outline, matching the other outline-style icons */
+function DiscoverIcon({ focused }: { focused: boolean }) {
+  return (
+    <Feather
+      name="search"
+      size={ICON_SIZE}
+      color={focused ? COLORS.accent : COLORS.textMuted}
+    />
+  );
+}
+
 /** Profile tab — person outline from Feather, matches brand guide person icon */
 function ProfileIcon({ focused }: { focused: boolean }) {
   return (
@@ -118,6 +129,19 @@ export default function TabsLayout() {
           tabBarIcon: ({ focused }) => (
             <TabIcon label="Home" focused={focused}>
               <HomeIcon focused={focused} />
+            </TabIcon>
+          ),
+        }}
+      />
+      {/* Discover sits second so Create lands dead centre in a five-tab bar,
+          which is where the filled lime square is designed to read from. */}
+      <Tabs.Screen
+        name="discover"
+        options={{
+          title: "Discover",
+          tabBarIcon: ({ focused }) => (
+            <TabIcon label="Discover" focused={focused}>
+              <DiscoverIcon focused={focused} />
             </TabIcon>
           ),
         }}

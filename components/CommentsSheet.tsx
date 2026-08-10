@@ -8,12 +8,12 @@ import {
   FlatList,
   TextInput,
   Platform,
-  Alert,
   ActivityIndicator,
   KeyboardAvoidingView,
   TextInputKeyPressEventData,
   NativeSyntheticEvent,
 } from "react-native";
+import { showAlert, confirm } from "@/utils/alert";
 import { Feather } from "@expo/vector-icons";
 import Animated, {
   FadeIn,
@@ -207,25 +207,18 @@ export default function CommentsSheet({
   );
 
   const handleDelete = useCallback(
-    (comment: PostComment) => {
-      const doDelete = async () => {
-        const ok = await remove(comment.id);
-        if (!ok) {
-          Alert.alert("Delete failed", "Could not delete that comment. Try again.");
-        }
-      };
-      if (Platform.OS === "web") {
-        const confirmed =
-          typeof window !== "undefined" && typeof window.confirm === "function"
-            ? window.confirm("Delete this comment?")
-            : true;
-        if (confirmed) void doDelete();
-        return;
+    async (comment: PostComment) => {
+      const confirmed = await confirm({
+        title: "Delete comment?",
+        message: "This can't be undone.",
+        confirmLabel: "Delete",
+        destructive: true,
+      });
+      if (!confirmed) return;
+      const ok = await remove(comment.id);
+      if (!ok) {
+        showAlert("Delete failed", "Could not delete that comment. Try again.");
       }
-      Alert.alert("Delete comment?", "This can't be undone.", [
-        { text: "Cancel", style: "cancel" },
-        { text: "Delete", style: "destructive", onPress: () => void doDelete() },
-      ]);
     },
     [remove]
   );

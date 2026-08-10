@@ -7,8 +7,9 @@ import Animated, {
   useAnimatedStyle,
   SharedValue,
 } from "react-native-reanimated";
+import { LinearGradient } from "expo-linear-gradient";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { COLORS, SPACING, FONTS, TYPE } from "@/constants/theme";
+import { COLORS, SPACING, FONTS, TYPE, SCRIMS } from "@/constants/theme";
 import AvatarImage from "./AvatarImage";
 
 export const COMPACT_BAR_HEIGHT = 52;
@@ -57,6 +58,18 @@ export default function ProfileCompactBar({
     ),
   }));
 
+  // The bar now floats over the profile banner, so the back / sign-out icons
+  // can land on bright artwork. A scrim keeps them legible at rest and hands
+  // off to the solid background as that fades in — the two never stack.
+  const scrimStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(
+      scrollY.value,
+      [COLLAPSE_START, COLLAPSE_END],
+      [1, 0],
+      Extrapolation.CLAMP
+    ),
+  }));
+
   const titleStyle = useAnimatedStyle(() => ({
     opacity: interpolate(
       scrollY.value,
@@ -81,6 +94,11 @@ export default function ProfileCompactBar({
       style={[styles.bar, { paddingLeft: padLeft, paddingRight: padRight }]}
       pointerEvents="box-none"
     >
+      {/* Readability scrim over the banner, fades out as the solid bar arrives */}
+      <Animated.View style={[styles.scrimLayer, scrimStyle]} pointerEvents="none">
+        <LinearGradient colors={SCRIMS.top} style={StyleSheet.absoluteFill} />
+      </Animated.View>
+
       {/* Solid background + hairline, fades in as the header collapses */}
       <Animated.View style={[styles.background, backgroundStyle]} pointerEvents="none" />
 
@@ -112,7 +130,21 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     // horizontal padding applied inline — safe-area dependent.
-    zIndex: 20,
+    //
+    // HIT TESTING: this must sit on a native top layer, not merely paint over
+    // the list. The profile header and grid underneath contain image- and
+    // AVPlayer-backed views, and on iOS those can win hit testing against an
+    // overlaid sibling even when it is visually on top — which silently ate
+    // taps on Back and Sign out. PostDetailModal's top bar hit the identical
+    // problem; these values mirror the fix that resolved it there.
+    zIndex: 1000,
+    elevation: 1000,
+  },
+  scrimLayer: {
+    ...StyleSheet.absoluteFillObject,
+    // Extends past the bar so the gradient's tail fades out gracefully rather
+    // than terminating on a hard edge mid-banner.
+    bottom: -SPACING.lg,
   },
   background: {
     ...StyleSheet.absoluteFillObject,
@@ -120,10 +152,16 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: COLORS.cardBorder,
   },
+  // Edge controls are the only interactive part of the bar, so they get their
+  // own layer above both scrims and the collapsing centre.
   side: {
-    minWidth: 40,
+    minWidth: 44,
+    minHeight: 44,
     alignItems: "center",
+    justifyContent: "center",
     flexDirection: "row",
+    zIndex: 1001,
+    elevation: 1001,
   },
   title: {
     flex: 1,

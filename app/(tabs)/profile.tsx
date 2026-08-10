@@ -8,12 +8,12 @@ import {
   ScrollView,
   TextInput,
   Modal,
-  Alert,
   Platform,
   Share,
   KeyboardAvoidingView,
   FlatList,
 } from "react-native";
+import { showAlert, confirm } from "@/utils/alert";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
 import { useRouter } from "expo-router";
@@ -27,16 +27,27 @@ import { signOut } from "firebase/auth";
 import { serverTimestamp } from "firebase/firestore";
 import { auth } from "@/config/firebase";
 import { useAuthStore } from "@/store/authStore";
-import { updateUserProfile, fetchUserProfile, uploadUserAvatar } from "@/hooks/useProfile";
-import { createBattle, useBattles } from "@/hooks/useBattles";
+import {
+  updateUserProfile,
+  fetchUserProfile,
+  uploadUserAvatar,
+  uploadUserBanner,
+  isUsernameTaken,
+  searchFieldsFor,
+} from "@/hooks/useProfile";
+import { createBattle, useBattles, isCountableBattle } from "@/hooks/useBattles";
 import { useUserPosts } from "@/hooks/usePosts";
+import { useSavedPosts } from "@/hooks/useSaves";
+import { LinearGradient } from "expo-linear-gradient";
 import {
   COLORS,
   SPACING,
   RADIUS,
   FONTS,
+  TYPE,
   ATHLETE_TYPES,
   TRENDING_LIKES_THRESHOLD,
+  bannerGradientForSport,
 } from "@/constants/theme";
 import { toHandle } from "@/utils/format";
 import { isVideoMedia } from "@/utils/media";
@@ -47,7 +58,7 @@ import LoadingSpinner from "@/components/LoadingSpinner";
 import IconButton from "@/components/IconButton";
 import ProfileHeader from "@/components/ProfileHeader";
 import ProfileTabs, { ProfileTabDef } from "@/components/ProfileTabs";
-import ProfileCompactBar, { COMPACT_BAR_HEIGHT } from "@/components/ProfileCompactBar";
+import ProfileCompactBar from "@/components/ProfileCompactBar";
 import ProfileGridSkeleton from "@/components/ProfileGridSkeleton";
 import PostGridThumb from "@/components/PostGridThumb";
 import BattleHistoryCard from "@/components/BattleHistoryCard";
@@ -83,7 +94,18 @@ function EditProfileModal({
   const [username, setUsername] = useState(current.username);
   const [bio, setBio] = useState(current.bio);
   const [athleteType, setAthleteType] = useState(current.athleteType);
-  const [avatarUri, setAvatarUri] = useState<string | null>(null);
+  const [avatarAsset, setAvatarAsset] =
+    useState<ImagePicker.ImagePickerAsset | null>(null);
+  const [bannerAsset, setBannerAsset] =
+    useState<ImagePicker.ImagePickerAsset | null>(null);
+  // ── Athlete identity. These render on the profile header but had no edit
+  //    surface anywhere in the app, so they could never be filled in — which
+  //    is exactly the information a coach or recruiter scans for first.
+  const [position, setPosition] = useState(current.position ?? "");
+  const [school, setSchool] = useState(current.school ?? "");
+  const [city, setCity] = useState(current.city ?? "");
+  const [stateRegion, setStateRegion] = useState(current.state ?? "");
+  const [gradYear, setGradYear] = useState(current.gradYear ?? "");
   const [saving, setSaving] = useState(false);
   const savingRef = React.useRef(false);
 
@@ -92,36 +114,81 @@ function EditProfileModal({
       setUsername(current.username);
       setBio(current.bio);
       setAthleteType(current.athleteType);
-      setAvatarUri(null);
+      setAvatarAsset(null);
+      setBannerAsset(null);
+      setPosition(current.position ?? "");
+      setSchool(current.school ?? "");
+      setCity(current.city ?? "");
+      setStateRegion(current.state ?? "");
+      setGradYear(current.gradYear ?? "");
     }
   }, [visible, current]);
 
-  async function pickAvatar() {
+  const isDirty =
+    username !== current.username ||
+    bio !== current.bio ||
+    athleteType !== current.athleteType ||
+    position !== (current.position ?? "") ||
+    school !== (current.school ?? "") ||
+    city !== (current.city ?? "") ||
+    stateRegion !== (current.state ?? "") ||
+    gradYear !== (current.gradYear ?? "") ||
+    !!avatarAsset ||
+    !!bannerAsset;
+
+  async function pickImage(kind: "avatar" | "banner") {
     try {
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
         allowsEditing: Platform.OS !== "web",
-        aspect: [1, 1],
+        // Crop to the shape each image is actually displayed in, so what the
+        // athlete frames in the picker is what lands on their profile.
+        aspect: kind === "avatar" ? [1, 1] : [16, 9],
         quality: 0.7,
       });
       if (result.canceled) return;
-      const uri = result.assets?.[0]?.uri?.trim();
+      const asset = result.assets?.[0];
+      const uri = asset?.uri?.trim();
       if (!uri) {
         console.error("[EditProfileModal] Image picker returned no usable URI", result);
-        Alert.alert("Image unavailable", "That image could not be selected. Please try another.");
+        showAlert("Image unavailable", "That image could not be selected. Please try another.");
         return;
       }
-      setAvatarUri(uri);
+      if (kind === "avatar") setAvatarAsset(asset);
+      else setBannerAsset(asset);
     } catch (err) {
-      console.error("[EditProfileModal] Profile image picker failed", err);
-      Alert.alert("Avatar failed", "Could not select that image. Try again.");
+      console.error(`[EditProfileModal] ${kind} picker failed`, err);
+      showAlert("Image failed", "Could not select that image. Try again.");
     }
+  }
+
+  /** Close, confirming first if there are unsaved edits. */
+  async function requestClose() {
+    if (saving) return;
+    if (!isDirty) {
+      onClose();
+      return;
+    }
+    const discard = await confirm({
+      title: "Discard changes?",
+      message: "Your edits to this profile will be lost.",
+      confirmLabel: "Discard",
+      cancelLabel: "Keep editing",
+      destructive: true,
+    });
+    if (discard) onClose();
   }
 
   async function save() {
     if (savingRef.current) return;
-    if (!username.trim() || username.trim().length < 3) {
-      Alert.alert("Invalid username", "Username must be at least 3 characters.");
+    const trimmedUsername = username.trim();
+    if (trimmedUsername.length < 3) {
+      showAlert("Invalid username", "Username must be at least 3 characters.");
+      return;
+    }
+    const trimmedGradYear = gradYear.trim();
+    if (trimmedGradYear && !/^\d{4}$/.test(trimmedGradYear)) {
+      showAlert("Invalid graduation year", "Enter a four-digit year, e.g. 2027.");
       return;
     }
     const authenticatedUserId = auth.currentUser?.uid;
@@ -130,17 +197,33 @@ function EditProfileModal({
         profileUserId: userId || null,
         authenticatedUserId: authenticatedUserId || null,
       });
-      Alert.alert("Sign in required", "Please sign in again before saving your profile.");
+      showAlert("Sign in required", "Please sign in again before saving your profile.");
       return;
     }
 
     savingRef.current = true;
     setSaving(true);
-    let imageUploadFailed = false;
+    const imageFailures: string[] = [];
     try {
-      const editAvatar = avatarUri;
+      // Usernames are the public handle and are used to identify athletes, so
+      // two people must not be able to claim the same one. isUsernameTaken has
+      // existed since registration shipped but the edit path never called it.
+      if (trimmedUsername !== current.username) {
+        const taken = await isUsernameTaken(trimmedUsername, authenticatedUserId);
+        if (taken) {
+          showAlert(
+            "Username taken",
+            `${trimmedUsername} is already claimed by another athlete. Try a different one.`
+          );
+          return;
+        }
+      }
+
+      const editAvatar = avatarAsset;
       const didAvatarChange = Boolean(
-        editAvatar && editAvatar !== current.avatar && editAvatar !== current.avatarUrl
+        editAvatar &&
+          editAvatar.uri !== current.avatar &&
+          editAvatar.uri !== current.avatarUrl
       );
 
       let avatarUrl = current.avatarUrl || current.avatar;
@@ -148,44 +231,82 @@ function EditProfileModal({
         try {
           avatarUrl = await uploadUserAvatar(editAvatar, authenticatedUserId);
         } catch (uploadError) {
-          imageUploadFailed = true;
-          console.error("[EditProfileModal] Continuing profile save after image upload failure", {
+          imageFailures.push("profile photo");
+          console.error("[EditProfileModal] Continuing profile save after avatar upload failure", {
             userId: authenticatedUserId,
-            uriScheme: editAvatar.split(":")[0] || "unknown",
+            uriScheme: editAvatar.uri.split(":")[0] || "unknown",
+            error: uploadError,
+          });
+        }
+      }
+
+      let bannerUrl = current.bannerUrl;
+      if (bannerAsset) {
+        try {
+          bannerUrl = await uploadUserBanner(bannerAsset, authenticatedUserId);
+        } catch (uploadError) {
+          imageFailures.push("banner");
+          console.error("[EditProfileModal] Continuing profile save after banner upload failure", {
+            userId: authenticatedUserId,
+            uriScheme: bannerAsset.uri.split(":")[0] || "unknown",
             error: uploadError,
           });
         }
       }
 
       const payload: Parameters<typeof updateUserProfile>[1] = {
-        username: username.trim(),
+        username: trimmedUsername,
         bio: bio.trim(),
         sport: athleteType,
+        // Written alongside `sport` so older readers that only know
+        // `athleteType` don't drift out of sync after an edit.
+        athleteType,
         avatarUrl,
         avatar: avatarUrl,
+        // Empty strings clear a field rather than deleting the key —
+        // normalizeUserProfile collapses "" back to undefined on read.
+        position: position.trim(),
+        school: school.trim(),
+        city: city.trim(),
+        state: stateRegion.trim(),
+        gradYear: trimmedGradYear,
+        // Keeps the prefix-search index in lockstep with the display values —
+        // an athlete who renames themselves stays findable under the new name.
+        ...searchFieldsFor({
+          username: trimmedUsername,
+          school: school.trim(),
+          city: city.trim(),
+        }),
         updatedAt: serverTimestamp(),
       };
+      if (bannerUrl) payload.bannerUrl = bannerUrl;
 
       await updateUserProfile(authenticatedUserId, payload);
       const profileAfterRead = await fetchUserProfile(authenticatedUserId);
 
       const updatedProfile: UserProfile = {
         ...current,
-        username: username.trim(),
+        username: trimmedUsername,
         bio: bio.trim(),
         athleteType,
         sport: athleteType,
         avatar: avatarUrl,
         avatarUrl,
+        bannerUrl,
+        position: position.trim() || undefined,
+        school: school.trim() || undefined,
+        city: city.trim() || undefined,
+        state: stateRegion.trim() || undefined,
+        gradYear: trimmedGradYear || undefined,
         updatedAt: null,
       };
 
       onSaved(profileAfterRead ?? updatedProfile);
       onClose();
-      if (imageUploadFailed) {
-        Alert.alert(
+      if (imageFailures.length > 0) {
+        showAlert(
           "Profile saved",
-          "Your profile details were saved, but the profile image could not be uploaded. Please try the image again."
+          `Your details were saved, but the ${imageFailures.join(" and ")} could not be uploaded. Please try the image again.`
         );
       }
     } catch (err) {
@@ -193,7 +314,7 @@ function EditProfileModal({
         userId: authenticatedUserId,
         error: err,
       });
-      Alert.alert("Save failed", "Could not update your profile. Please try again.");
+      showAlert("Save failed", "Could not update your profile. Please try again.");
     } finally {
       savingRef.current = false;
       setSaving(false);
@@ -201,7 +322,7 @@ function EditProfileModal({
   }
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={requestClose}>
       <View style={editStyles.overlay}>
         {/* KEYBOARD: text inputs live in a bottom sheet — without avoidance the
             iOS keyboard covers the Bio field and Save button. */}
@@ -214,25 +335,63 @@ function EditProfileModal({
           <View style={editStyles.handle} />
           <Text style={editStyles.title}>Edit Profile</Text>
 
-          {/* Avatar */}
-          <Pressable
-            onPress={pickAvatar}
-            accessibilityRole="button"
-            accessibilityLabel="Change profile photo"
-            style={({ pressed }) => [editStyles.avatarWrap, pressed && { opacity: 0.8 }]}
-          >
-            {avatarUri ? (
-              <Image source={{ uri: avatarUri }} style={editStyles.avatar} />
-            ) : (
-              <AvatarImage uri={current.avatar} username={current.username} size={72} />
-            )}
-            <View style={editStyles.avatarEditBadge}>
-              <Feather name="edit-2" size={11} color={COLORS.textSecondary} />
-            </View>
-          </Pressable>
+          {/* ── Banner + avatar, previewed in the layout they'll appear in ──── */}
+          <View style={editStyles.mediaPreview}>
+            <Pressable
+              onPress={() => pickImage("banner")}
+              disabled={saving}
+              accessibilityRole="button"
+              accessibilityLabel={
+                bannerAsset || current.bannerUrl ? "Change banner image" : "Add a banner image"
+              }
+              style={({ pressed }) => [editStyles.bannerWrap, pressed && { opacity: 0.85 }]}
+            >
+              {bannerAsset || current.bannerUrl ? (
+                <Image
+                  source={{ uri: bannerAsset?.uri || (current.bannerUrl as string) }}
+                  style={editStyles.bannerImage}
+                  resizeMode="cover"
+                />
+              ) : (
+                <LinearGradient
+                  colors={[...bannerGradientForSport(athleteType)]}
+                  start={{ x: 0.1, y: 0 }}
+                  end={{ x: 0.9, y: 1 }}
+                  style={StyleSheet.absoluteFill}
+                />
+              )}
+              <View style={editStyles.bannerHint}>
+                <Feather name="image" size={12} color={COLORS.white} />
+                <Text style={editStyles.bannerHintText}>
+                  {bannerAsset || current.bannerUrl ? "Change banner" : "Add banner"}
+                </Text>
+              </View>
+            </Pressable>
+
+            <Pressable
+              onPress={() => pickImage("avatar")}
+              disabled={saving}
+              accessibilityRole="button"
+              accessibilityLabel="Change profile photo"
+              style={({ pressed }) => [editStyles.avatarWrap, pressed && { opacity: 0.8 }]}
+            >
+              {avatarAsset ? (
+                <Image source={{ uri: avatarAsset.uri }} style={editStyles.avatar} />
+              ) : (
+                <AvatarImage uri={current.avatar} username={current.username} size={64} />
+              )}
+              <View style={editStyles.avatarEditBadge}>
+                <Feather name="edit-2" size={11} color={COLORS.textSecondary} />
+              </View>
+            </Pressable>
+          </View>
 
           {/* Fields */}
-          <ScrollView showsVerticalScrollIndicator={false} style={{ maxHeight: 400 }}>
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            style={editStyles.fields}
+          >
             <Text style={editStyles.label}>Username</Text>
             <TextInput
               style={editStyles.input}
@@ -241,6 +400,8 @@ function EditProfileModal({
               autoCapitalize="none"
               autoCorrect={false}
               editable={!saving}
+              maxLength={30}
+              accessibilityLabel="Username"
               placeholderTextColor={COLORS.textMuted}
             />
 
@@ -253,6 +414,7 @@ function EditProfileModal({
               maxLength={160}
               editable={!saving}
               placeholder="Tell the arena who you are…"
+              accessibilityLabel="Bio, optional"
               placeholderTextColor={COLORS.textMuted}
             />
 
@@ -268,17 +430,94 @@ function EditProfileModal({
                 />
               ))}
             </View>
+
+            {/* ── Recruiting details ──────────────────────────────────────── */}
+            <Text style={editStyles.sectionNote}>
+              These show on your profile header — the first thing a coach reads.
+            </Text>
+
+            <Text style={editStyles.label}>Position</Text>
+            <TextInput
+              style={editStyles.input}
+              value={position}
+              onChangeText={setPosition}
+              editable={!saving}
+              maxLength={40}
+              placeholder="e.g. QB, Point Guard"
+              accessibilityLabel="Position, optional"
+              placeholderTextColor={COLORS.textMuted}
+            />
+
+            <Text style={editStyles.label}>School or team</Text>
+            <TextInput
+              style={editStyles.input}
+              value={school}
+              onChangeText={setSchool}
+              editable={!saving}
+              maxLength={60}
+              placeholder="e.g. Lincoln High"
+              accessibilityLabel="School or team, optional"
+              placeholderTextColor={COLORS.textMuted}
+            />
+
+            <View style={editStyles.fieldRow}>
+              <View style={editStyles.fieldGrow}>
+                <Text style={editStyles.label}>City</Text>
+                <TextInput
+                  style={editStyles.input}
+                  value={city}
+                  onChangeText={setCity}
+                  editable={!saving}
+                  maxLength={40}
+                  placeholder="e.g. Dallas"
+                  accessibilityLabel="City, optional"
+                  placeholderTextColor={COLORS.textMuted}
+                />
+              </View>
+              <View style={editStyles.fieldShort}>
+                <Text style={editStyles.label}>State</Text>
+                <TextInput
+                  style={editStyles.input}
+                  value={stateRegion}
+                  onChangeText={setStateRegion}
+                  editable={!saving}
+                  maxLength={20}
+                  autoCapitalize="characters"
+                  placeholder="TX"
+                  accessibilityLabel="State or region, optional"
+                  placeholderTextColor={COLORS.textMuted}
+                />
+              </View>
+            </View>
+
+            <Text style={editStyles.label}>Graduation year</Text>
+            <TextInput
+              style={editStyles.input}
+              value={gradYear}
+              onChangeText={setGradYear}
+              editable={!saving}
+              keyboardType="number-pad"
+              maxLength={4}
+              placeholder="2027"
+              accessibilityLabel="Graduation year, optional. Four digits."
+              placeholderTextColor={COLORS.textMuted}
+            />
           </ScrollView>
 
           <GlowButton
             label="Save Changes"
             onPress={save}
             loading={saving}
+            disabled={!isDirty}
             size="lg"
             style={{ marginTop: SPACING.lg }}
+            accessibilityLabel={
+              isDirty ? "Save profile changes" : "Save profile changes — nothing has changed yet"
+            }
           />
           <Pressable
-            onPress={onClose}
+            onPress={requestClose}
+            disabled={saving}
             accessibilityRole="button"
             accessibilityLabel="Cancel editing"
             style={({ pressed }) => [editStyles.cancelBtn, pressed && { opacity: 0.7 }]}
@@ -320,16 +559,51 @@ const editStyles = StyleSheet.create({
     marginBottom: SPACING.xl,
     textAlign: "center",
   },
-  avatarWrap: {
-    alignSelf: "center",
+  // ── Banner + avatar preview ──────────────────────────────────────────────
+  // Mirrors the real profile header layout so what's framed here is what ships.
+  mediaPreview: {
     marginBottom: SPACING.xl,
-    position: "relative",
   },
-  avatar: { width: 72, height: 72, borderRadius: 36 },
+  bannerWrap: {
+    height: 104,
+    borderRadius: RADIUS.md,
+    overflow: "hidden",
+    backgroundColor: COLORS.surfaceDeep,
+    borderWidth: 1,
+    borderColor: COLORS.cardBorder,
+  },
+  bannerImage: { width: "100%", height: "100%" },
+  bannerHint: {
+    position: "absolute",
+    top: SPACING.sm,
+    right: SPACING.sm,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: 5,
+    borderRadius: RADIUS.full,
+    backgroundColor: COLORS.scrimBadge,
+  },
+  bannerHintText: {
+    color: COLORS.white,
+    fontSize: 11,
+    fontWeight: FONTS.bold,
+  },
+  avatarWrap: {
+    position: "absolute",
+    left: SPACING.md,
+    bottom: -SPACING.md,
+    borderRadius: 40,
+    borderWidth: 3,
+    borderColor: COLORS.card,
+    backgroundColor: COLORS.card,
+  },
+  avatar: { width: 64, height: 64, borderRadius: 32 },
   avatarEditBadge: {
     position: "absolute",
-    bottom: 0,
-    right: -4,
+    bottom: -2,
+    right: -6,
     backgroundColor: COLORS.surface,
     borderRadius: 12,
     width: 24,
@@ -365,6 +639,24 @@ const editStyles = StyleSheet.create({
     gap: SPACING.sm,
     marginBottom: SPACING.sm,
   },
+  // Capped so the sheet can't grow past the screen now that the form is longer;
+  // the fields scroll inside while Save/Cancel stay pinned and reachable.
+  fields: { maxHeight: 360 },
+  sectionNote: {
+    color: COLORS.textMuted,
+    fontSize: TYPE.caption,
+    lineHeight: 16,
+    marginTop: SPACING.lg,
+    paddingTop: SPACING.md,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.cardBorder,
+  },
+  fieldRow: {
+    flexDirection: "row",
+    gap: SPACING.sm,
+  },
+  fieldGrow: { flex: 1 },
+  fieldShort: { width: 96 },
   cancelBtn: {
     paddingVertical: SPACING.md,
     alignItems: "center",
@@ -386,6 +678,11 @@ export default function ProfileScreen() {
   // shows or casts votes, so skip the votedMap lookups (3 Firestore `in`
   // queries per mount).
   const { battles, loading: battlesLoading } = useBattles(userId, false);
+  const {
+    posts: savedPosts,
+    loading: savedLoading,
+    refresh: refreshSaved,
+  } = useSavedPosts(userId);
   const [editVisible, setEditVisible] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [activeTab, setActiveTab] = useState<ProfileTab>("posts");
@@ -401,13 +698,17 @@ export default function ProfileScreen() {
   });
 
   const profile = profileStore;
+  // Only matched contests count. An open challenge that expired unanswered was
+  // never a battle, so it must not appear in the Battles tab or inflate the
+  // battle total on the header.
   const profileBattles = useMemo(
     () =>
       battles.filter(
         (battle) =>
-          battle.playerA?.userId === userId ||
-          battle.playerB?.userId === userId ||
-          battle.creatorId === userId
+          isCountableBattle(battle) &&
+          (battle.playerA?.userId === userId ||
+            battle.playerB?.userId === userId ||
+            battle.creatorId === userId)
       ),
     [battles, userId]
   );
@@ -421,12 +722,15 @@ export default function ProfileScreen() {
         return;
       }
       void refreshPosts();
+      // Saves can be made from the feed or a detail modal, so the Saved tab
+      // needs to re-read when the athlete comes back to their profile.
+      void refreshSaved();
       if (userId) {
         void fetchUserProfile(userId).then((freshProfile) => {
           if (freshProfile) setProfile(freshProfile);
         });
       }
-    }, [refreshPosts, setProfile, userId])
+    }, [refreshPosts, refreshSaved, setProfile, userId])
   );
 
   function handleSaved(updatedProfile: UserProfile) {
@@ -442,45 +746,22 @@ export default function ProfileScreen() {
       // without waiting for the onAuthStateChanged round-trip.
       clearAuth();
     } catch {
-      if (Platform.OS === "web") {
-        if (typeof window !== "undefined") window.alert("Could not sign out.");
-      } else {
-        Alert.alert("Error", "Could not sign out.");
-      }
+      showAlert("Error", "Could not sign out.");
     } finally {
       setSigningOut(false);
     }
   }
 
-  function handleSignOut() {
-    // Confirmation guard — prevents accidental sign-outs from the ⚙ gear tap.
-    // NOTE: Alert.alert's multi-button + onPress callbacks are not supported on
-    // web (react-native-web only polyfills a basic window.alert that ignores the
-    // buttons array), so the confirm button's onPress never fires there. Use
-    // window.confirm on web and keep the native Alert dialog on iOS/Android.
-    if (Platform.OS === "web") {
-      const confirmed =
-        typeof window !== "undefined" && typeof window.confirm === "function"
-          ? window.confirm("Are you sure you want to sign out?")
-          : true;
-      if (confirmed) void doSignOut();
-      return;
-    }
-
-    Alert.alert(
-      "Sign Out",
-      "Are you sure you want to sign out?",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Sign Out",
-          style: "destructive",
-          onPress: () => {
-            void doSignOut();
-          },
-        },
-      ]
-    );
+  // Confirmation guard — prevents accidental sign-outs from the gear tap.
+  // The web/native split that used to live here now lives in utils/alert.
+  async function handleSignOut() {
+    const confirmed = await confirm({
+      title: "Sign Out",
+      message: "Are you sure you want to sign out?",
+      confirmLabel: "Sign Out",
+      destructive: true,
+    });
+    if (confirmed) void doSignOut();
   }
 
   async function handleBattle(post: Post) {
@@ -502,11 +783,11 @@ export default function ProfileScreen() {
         category: "Highlights",
         durationHours: 24,
       });
-      Alert.alert("Challenge open", "Your post is now open for challenges.");
+      showAlert("Challenge open", "Your post is now open for challenges.");
       setSelectedPost(null);
     } catch (err) {
       console.error("Start battle from profile failed", err);
-      Alert.alert("Failed", "Could not create battle. Please try again.");
+      showAlert("Failed", "Could not create battle. Please try again.");
     } finally {
       startingBattleRef.current = null;
       setStartingBattlePostId(null);
@@ -546,15 +827,25 @@ export default function ProfileScreen() {
 
   const handleShareProfile = useCallback(async () => {
     if (!profile) return;
-    const message = `Check out ${profile.username} (${toHandle(profile.username)}) on Momentum — highlights, battles, and more.`;
+    // Mirrors utils/shareBattle: identity line, a reason to open it, then a
+    // deep link. Sharing bare text with no link gave recipients nothing to tap.
+    const identity = [profile.sport || profile.athleteType, profile.school]
+      .filter(Boolean)
+      .join(" · ");
+    const message = [
+      `${profile.username} (${toHandle(profile.username)}) on Momentum${identity ? ` — ${identity}` : ""}.`,
+      "Highlights, battles, and record — all in one place.",
+      `Open in Momentum: momentum://profile/${profile.userId}`,
+    ].join("\n");
     try {
-      await Share.share({ message });
+      await Share.share({ title: `${profile.username} on Momentum`, message });
     } catch {
       // Share sheet unavailable (e.g. desktop web) — non-fatal.
     }
   }, [profile]);
 
-  const isGridTab = activeTab === "posts" || activeTab === "highlights";
+  const isGridTab =
+    activeTab === "posts" || activeTab === "highlights" || activeTab === "saved";
   const listData = useMemo<(Post | Battle)[]>(
     () =>
       activeTab === "posts"
@@ -563,13 +854,19 @@ export default function ProfileScreen() {
         ? highlightPosts
         : activeTab === "battles"
         ? profileBattles
-        : [],
-    [activeTab, highlightPosts, profileBattles, sortedPosts]
+        : savedPosts,
+    [activeTab, highlightPosts, profileBattles, savedPosts, sortedPosts]
   );
   const renderProfileItem = useCallback(
     ({ item }: { item: Post | Battle }) =>
       isGridTab ? (
-        <PostGridThumb post={item as Post} onPress={setSelectedPost} context="ProfileGrid" />
+        <PostGridThumb
+          post={item as Post}
+          onPress={setSelectedPost}
+          context="ProfileGrid"
+          currentUserId={userId}
+          onDeleted={() => setSelectedPost(null)}
+        />
       ) : (
         <BattleHistoryCard
           battle={item as Battle}
@@ -633,11 +930,15 @@ export default function ProfileScreen() {
               actionLabel="Find a battle"
               onAction={() => router.push("/battles" as never)}
             />
+          ) : activeTab === "saved" && savedLoading ? (
+            <ProfileGridSkeleton />
           ) : activeTab === "saved" ? (
             <EmptyState
               icon="🔖"
-              title="No saved posts yet"
-              subtitle="Highlights you save will live here."
+              title="No saved highlights yet"
+              subtitle="Tap the bookmark on any highlight to keep it here. Only you can see your saves."
+              actionLabel="Browse the feed"
+              onAction={() => router.push("/" as never)}
             />
           ) : activeTab === "highlights" ? (
             <EmptyState
@@ -698,6 +999,7 @@ export default function ProfileScreen() {
         currentUserId={userId}
         onBattle={handleBattle}
         isBattling={!!selectedPost && startingBattlePostId === selectedPost.id}
+        onDeleted={() => setSelectedPost(null)}
       />
     </SafeAreaView>
   );
@@ -715,8 +1017,11 @@ const styles = StyleSheet.create({
   // ── Grid ─────────────────────────────────────────────────────────────────
   // paddingHorizontal must stay SPACING.lg — PostGridThumb's CELL math and
   // ProfileGridSkeleton both assume it.
+  // No paddingTop: the banner runs to the top of the safe area and the compact
+  // bar floats over it, its background fading in only once the banner has
+  // scrolled away. Reserving COMPACT_BAR_HEIGHT here left a black strip above
+  // the banner and broke the edge-to-edge look.
   grid: {
-    paddingTop: COMPACT_BAR_HEIGHT,
     paddingHorizontal: SPACING.lg,
     paddingBottom: SPACING.xxxl,
     gap: SPACING.sm,

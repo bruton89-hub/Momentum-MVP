@@ -7,13 +7,13 @@ import {
   ScrollView,
   Image,
   Pressable,
-  Alert,
   Dimensions,
   Platform,
   Linking,
   KeyboardAvoidingView,
   Keyboard,
 } from "react-native";
+import { showAlert, showAlertWithAction, confirm } from "@/utils/alert";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
@@ -42,10 +42,6 @@ import {
 import GlowButton from "@/components/GlowButton";
 import Chip from "@/components/Chip";
 import IconButton from "@/components/IconButton";
-import VideoPostEditor from "@/components/VideoPostEditor";
-import {
-  type VideoAudioTrackId,
-} from "@/constants/videoEditing";
 
 const { width: SCREEN_W } = Dimensions.get("window");
 const MEDIA_PREVIEW_H = Math.round(SCREEN_W * 0.9);
@@ -60,6 +56,23 @@ function formatDuration(ms?: number | null): string | null {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
+function pickerAssetType(asset: ImagePicker.ImagePickerAsset): "image" | "video" {
+  if (asset.type === "video" || asset.mimeType?.toLowerCase().startsWith("video/")) {
+    return "video";
+  }
+  // Expo ImagePicker 14's web implementation omits both `type` and `mimeType`
+  // when its Image probe rejects a selected video. The FileReader data URI
+  // still carries the authoritative MIME type.
+  if (asset.uri.slice(0, 32).toLowerCase().startsWith("data:video/")) {
+    return "video";
+  }
+  const extension = asset.fileName?.split(".").pop()?.toLowerCase();
+  if (extension && ["mp4", "mov", "m4v", "webm", "avi"].includes(extension)) {
+    return "video";
+  }
+  return "image";
+}
+
 export default function CreateScreen() {
   const router = useRouter();
   const reducedMotion = useReducedMotion();
@@ -72,12 +85,9 @@ export default function CreateScreen() {
     ImagePicker.ImagePickerAsset[]
   >([]);
   const [caption, setCaption] = useState("");
-  const [selectedMusic, setSelectedMusic] =
-    useState<VideoAudioTrackId | null>(null);
-  const [trimStart, setTrimStart] = useState(0);
-  const [trimEnd, setTrimEnd] = useState<number | null>(null);
-  const [textOverlay, setTextOverlay] = useState("");
-  const [selectedCoverUri, setSelectedCoverUri] = useState<string | null>(null);
+  const [step, setStep] = useState<1 | 2>(1);
+  const [sportPickerOpen, setSportPickerOpen] = useState(false);
+  const [optionalDetailsOpen, setOptionalDetailsOpen] = useState(false);
   const [battleEnabled, setBattleEnabled] = useState(false);
   const [category, setCategory] = useState(BATTLE_CATEGORIES[0] as string);
   const [durationHours, setDurationHours] = useState(BATTLE_DURATIONS[0].hours);
@@ -103,26 +113,36 @@ export default function CreateScreen() {
   const [publishedWithChallenge, setPublishedWithChallenge] = useState(false);
   const publishingRef = useRef(false);
 
+  // ── Resume state for a retried publish ─────────────────────────────────────
+  // A publish is three network steps (upload → post doc → optional challenge).
+  // If step 2 or 3 fails, the bytes for step 1 are already in Storage and the
+  // post doc may already exist. Without this state, tapping Publish again
+  // re-uploaded the same file (orphaning the first copy, which is billed
+  // forever and never garbage-collected) and wrote a SECOND post document.
+  // Keyed by source URI so choosing different media correctly starts over.
+  const uploadedMediaRef = useRef<{ uri: string; url: string } | null>(null);
+  const createdPostIdRef = useRef<string | null>(null);
+
+  const clearPublishResumeState = useCallback(() => {
+    uploadedMediaRef.current = null;
+    createdPostIdRef.current = null;
+  }, []);
+
   const busy = isUploading || isSubmitting;
   const hasUnsavedWork =
     !!mediaUri || !!caption.trim() || !!position.trim() || !!school.trim();
   const videoDuration = formatDuration(selectedMedia[0]?.duration);
 
   function showPermissionAlert() {
-    Alert.alert(
+    // showAlertWithAction degrades to a plain message on web, where there is no
+    // OS settings screen to deep-link into.
+    showAlertWithAction(
       "Photo access needed",
       "Momentum needs access to your photo library so you can choose a highlight to upload. You can enable it in Settings.",
-      Platform.OS === "web"
-        ? [{ text: "OK" }]
-        : [
-            { text: "Not now", style: "cancel" },
-            {
-              text: "Open Settings",
-              onPress: () => {
-                Linking.openSettings().catch(() => undefined);
-              },
-            },
-          ]
+      "Open Settings",
+      () => {
+        Linking.openSettings().catch(() => undefined);
+      }
     );
   }
 
@@ -152,40 +172,33 @@ export default function CreateScreen() {
           typeof asset.fileSize === "number" &&
           asset.fileSize > MAX_POST_MEDIA_BYTES
         ) {
-          Alert.alert(
+          showAlert(
             "Media too large",
             "Choose a photo or video that is 50 MB or smaller."
           );
           return;
         }
+        clearPublishResumeState();
         setSelectedMedia([asset]);
         setMediaUri(asset.uri);
-        setMediaType(asset.type === "video" ? "video" : "image");
-        setSelectedMusic(null);
-        setTrimStart(0);
-        setTrimEnd(null);
-        setTextOverlay("");
-        setSelectedCoverUri(null);
+        setMediaType(pickerAssetType(asset));
         setPreviewPlaying(false);
         setPreviewMuted(true);
+        setStep(1);
       }
     } catch (err) {
       console.error("Create media picker failed", err);
-      Alert.alert("Media picker failed", "Could not select that media. Please try again.");
+      showAlert("Media picker failed", "Could not select that media. Please try again.");
     }
   }
 
   const removeMedia = useCallback(() => {
+    clearPublishResumeState();
     setSelectedMedia([]);
     setMediaUri(null);
     setMediaType("image");
-    setSelectedMusic(null);
-    setTrimStart(0);
-    setTrimEnd(null);
-    setTextOverlay("");
-    setSelectedCoverUri(null);
     setPreviewPlaying(false);
-  }, []);
+  }, [clearPublishResumeState]);
 
   function resetForm() {
     removeMedia();
@@ -195,37 +208,43 @@ export default function CreateScreen() {
     setPosition("");
     setSchool("");
     setUploadProgress(0);
+    setStep(1);
+    setSportPickerOpen(false);
+    setOptionalDetailsOpen(false);
   }
 
   // ── Exit confirmation — never silently discard selected media or text. ─────
-  function handleClose() {
+  async function handleClose() {
     if (busy) return; // publish in flight — don't abandon it
     if (!hasUnsavedWork) {
       router.replace("/");
       return;
     }
-    if (Platform.OS === "web") {
-      const confirmed =
-        typeof window !== "undefined" && typeof window.confirm === "function"
-          ? window.confirm("Discard this highlight? Your media and details will be lost.")
-          : true;
-      if (confirmed) router.replace("/");
-      return;
-    }
-    Alert.alert("Discard highlight?", "Your selected media and details will be lost.", [
-      { text: "Keep editing", style: "cancel" },
-      { text: "Discard", style: "destructive", onPress: () => router.replace("/") },
-    ]);
+    // One code path for both platforms — confirm() handles the web/native split.
+    const discard = await confirm({
+      title: "Discard highlight?",
+      message: "Your selected media and details will be lost.",
+      confirmLabel: "Discard",
+      cancelLabel: "Keep editing",
+      destructive: true,
+    });
+    if (discard) router.replace("/");
+  }
+
+  function handleContinue() {
+    if (!mediaUri || busy) return;
+    setPreviewPlaying(false);
+    setStep(2);
   }
 
   async function handlePost() {
     if (busy || publishingRef.current) return;
     if (!userId || !profile) {
-      Alert.alert("Sign in required", "Please sign in to post.");
+      showAlert("Sign in required", "Please sign in to post.");
       return;
     }
     if (!mediaUri) {
-      Alert.alert("Add media", "Select a photo or video to post.");
+      showAlert("Add media", "Select a photo or video to post.");
       return;
     }
 
@@ -235,46 +254,81 @@ export default function CreateScreen() {
     setUploadProgress(0);
 
     try {
-      const mediaUrl = await uploadMedia(mediaUri, userId, setUploadProgress);
+      // ── 1 · Media upload. Skipped when a previous attempt already put this
+      //        exact file in Storage, so a retry costs no bandwidth and leaves
+      //        no orphaned copy behind.
+      let mediaUrl: string;
+      if (uploadedMediaRef.current?.uri === mediaUri) {
+        mediaUrl = uploadedMediaRef.current.url;
+        setUploadProgress(100);
+      } else {
+        // Pass the complete picker asset on web so the uploader retains the
+        // browser-provided MIME type and original filename while decoding its
+        // data URI. Native still uses the same local URI path.
+        mediaUrl = await uploadMedia(
+          selectedMedia[0] ?? mediaUri,
+          userId,
+          setUploadProgress
+        );
+        uploadedMediaRef.current = { uri: mediaUri, url: mediaUrl };
+      }
 
       setIsUploading(false);
       setIsSubmitting(true);
 
-      const postId = await createPost({
-        userId,
-        username: profile.username,
-        userAvatar: profile.avatarUrl || profile.avatar,
-        avatarUrl: profile.avatarUrl || profile.avatar,
-        mediaUrl,
-        mediaType,
-        caption: caption.trim(),
-        battleEnabled,
-        videoEdit: {
-          music: selectedMusic,
-          trimStart,
-          trimEnd,
-          textOverlay,
-          coverUri: selectedCoverUri,
-        },
-        sport: sport ?? undefined,
-        position,
-        school,
-      });
-
-      if (battleEnabled) {
-        await createBattle({
-          creatorId: userId,
-          playerA: {
+      // ── 3 · Post document. Reuse the id when a previous attempt already
+      //        created it and only the challenge step failed — otherwise a
+      //        retry publishes the same highlight twice.
+      let postId = createdPostIdRef.current;
+      if (!postId) {
+        try {
+          postId = await createPost({
             userId,
             username: profile.username,
-            avatar: profile.avatar,
+            userAvatar: profile.avatarUrl || profile.avatar,
+            avatarUrl: profile.avatarUrl || profile.avatar,
             mediaUrl,
             mediaType,
-            postId,
-          },
-          category,
-          durationHours,
-        });
+            caption: caption.trim(),
+            battleEnabled,
+            sport: sport ?? undefined,
+            position,
+            school,
+          });
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : "Unknown Firestore error.";
+          throw new Error(`Media uploaded, but the post could not be created. ${detail}`);
+        }
+      }
+      createdPostIdRef.current = postId;
+
+      // ── 4 · Optional challenge. Separate document, separate failure mode.
+      if (battleEnabled) {
+        try {
+          await createBattle({
+            creatorId: userId,
+            playerA: {
+              userId,
+              username: profile.username,
+              avatar: profile.avatar,
+              mediaUrl,
+              mediaType,
+              postId,
+            },
+            category,
+            durationHours,
+          });
+        } catch (battleError) {
+          // The highlight IS live. Saying "couldn't publish" here was a lie
+          // that pushed athletes into re-publishing a post that already
+          // existed. Report the partial outcome and retry only what failed.
+          console.error("[create] challenge creation failed after publish", battleError);
+          showAlert(
+            "Published — challenge didn't open",
+            "Your highlight is live on the feed, but the challenge couldn't be created.\n\nTap Publish to retry just the challenge, or switch off \"Open for Challenge\" to finish up."
+          );
+          return;
+        }
       }
 
       // Success — confirm before navigating anywhere.
@@ -282,13 +336,14 @@ export default function CreateScreen() {
       resetForm();
       setShowSuccess(true);
     } catch (err) {
-      // Recoverable failure — media, caption, and details all stay in state.
+      // Recoverable failure — media, caption, and details all stay in state,
+      // and the resume refs mean a retry picks up where this attempt stopped.
       console.error("Create post failed", err);
       const message =
         err instanceof Error ? err.message : "Something went wrong. Please try again.";
-      Alert.alert(
+      showAlert(
         "Couldn't publish",
-        `${message}\n\nYour highlight and details are still here — you can retry.`
+        `${message}\n\nYour highlight and details are still here — tap Publish to pick up where it stopped.`
       );
     } finally {
       publishingRef.current = false;
@@ -359,30 +414,31 @@ export default function CreateScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
 
-      {/* ── Top bar: ✕  New Highlight  Publish ─────────────────────────────── */}
+      {/* Header and two-step progress stay visible while the content changes. */}
       <View style={styles.topBar}>
         <View style={styles.topBarClose}>
           <IconButton
-            icon="x"
+            icon={step === 1 ? "x" : "arrow-left"}
             variant="plain"
-            accessibilityLabel={hasUnsavedWork ? "Close — you'll be asked to confirm" : "Close and return home"}
-            onPress={handleClose}
+            accessibilityLabel={step === 1 ? "Close create highlight" : "Back to media"}
+            onPress={step === 1 ? handleClose : () => setStep(1)}
+            disabled={busy}
           />
         </View>
         <Text style={styles.topBarTitle} accessibilityRole="header">New Highlight</Text>
-        <Pressable
-          onPress={handlePost}
-          disabled={!mediaUri || busy}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          accessibilityRole="button"
-          accessibilityLabel="Publish highlight"
-          accessibilityState={{ disabled: !mediaUri || busy, busy }}
-          style={({ pressed }) => [styles.topBarNext, pressed && { opacity: 0.7 }]}
-        >
-          <Text style={[styles.nextLabel, (!mediaUri || busy) && styles.nextLabelDisabled]}>
-            {isUploading ? `${uploadProgress}%` : isSubmitting ? "Saving…" : "Publish"}
-          </Text>
-        </Pressable>
+        <View style={styles.topBarClose} />
+      </View>
+
+      <View style={styles.stepper} accessibilityRole="progressbar" accessibilityValue={{ min: 1, max: 2, now: step }}>
+        <View style={styles.stepItem}>
+          <View style={[styles.stepDot, styles.stepDotActive]}><Text style={styles.stepNumberActive}>1</Text></View>
+          <Text style={[styles.stepLabel, styles.stepLabelActive]}>Media</Text>
+        </View>
+        <View style={[styles.stepLine, step === 2 && styles.stepLineActive]} />
+        <View style={styles.stepItem}>
+          <View style={[styles.stepDot, step === 2 && styles.stepDotActive]}><Text style={step === 2 ? styles.stepNumberActive : styles.stepNumber}>2</Text></View>
+          <Text style={[styles.stepLabel, step === 2 && styles.stepLabelActive]}>Details</Text>
+        </View>
       </View>
 
       <KeyboardAvoidingView
@@ -394,7 +450,8 @@ export default function CreateScreen() {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          {/* ── Stage 1 · Media ─────────────────────────────────────────────── */}
+          {step === 1 ? <>
+          {/* Step 1: media is the hero. */}
           {mediaUri ? (
             <Animated.View
               entering={reducedMotion ? undefined : FadeIn.duration(250)}
@@ -454,7 +511,7 @@ export default function CreateScreen() {
                 </Pressable>
               )}
 
-              {/* Replace / Remove */}
+              {/* Replacement keeps the picker and all validation on one path. */}
               <View style={styles.mediaActions}>
                 <Pressable
                   onPress={pickMedia}
@@ -464,17 +521,7 @@ export default function CreateScreen() {
                   style={({ pressed }) => [styles.mediaActionBtn, pressed && { opacity: 0.75 }]}
                 >
                   <Feather name="refresh-cw" size={13} color={COLORS.textPrimary} />
-                  <Text style={styles.mediaActionText}>Replace</Text>
-                </Pressable>
-                <Pressable
-                  onPress={removeMedia}
-                  disabled={busy}
-                  accessibilityRole="button"
-                  accessibilityLabel="Remove selected media"
-                  style={({ pressed }) => [styles.mediaActionBtn, pressed && { opacity: 0.75 }]}
-                >
-                  <Feather name="trash-2" size={13} color={COLORS.error} />
-                  <Text style={[styles.mediaActionText, { color: COLORS.error }]}>Remove</Text>
+                  <Text style={styles.mediaActionText}>Replace Media</Text>
                 </Pressable>
               </View>
             </Animated.View>
@@ -507,75 +554,43 @@ export default function CreateScreen() {
             </Pressable>
           )}
 
-          {/* ── Stage 2 · Video tools (existing editor — videos only) ───────── */}
-          {selectedMedia.length > 0 && mediaType === "video" && (
-            <VideoPostEditor
-              uri={selectedMedia[0].uri}
-              selectedMusic={selectedMusic}
-              onSelectedMusicChange={setSelectedMusic}
-              trimStart={trimStart}
-              onTrimStartChange={setTrimStart}
-              trimEnd={trimEnd}
-              onTrimEndChange={setTrimEnd}
-              textOverlay={textOverlay}
-              onTextOverlayChange={setTextOverlay}
-              selectedCoverUri={selectedCoverUri}
-              onSelectedCoverUriChange={setSelectedCoverUri}
-              showPreview={false}
-              disabled={busy}
-            />
+          {mediaUri && (
+            <View style={styles.continueWrap}>
+              <GlowButton label="Continue" onPress={handleContinue} disabled={busy} size="lg" accessibilityLabel="Continue to highlight details" />
+            </View>
+          )}
+          </> : <>
+
+          {/* Step 2: compact context preview, then the publishing essentials. */}
+          {mediaUri && (
+            <View style={styles.compactPreviewCard}>
+              {mediaType === "image" ? (
+                <Image source={{ uri: mediaUri }} style={styles.compactPreview} resizeMode="cover" />
+              ) : (
+                <Pressable onPress={() => setPreviewPlaying((value) => !value)} accessibilityRole="button" accessibilityLabel={previewPlaying ? "Pause video preview" : "Play video preview"} style={styles.compactPreview}>
+                  <Video source={{ uri: mediaUri }} style={styles.mediaFill} resizeMode={ResizeMode.COVER} shouldPlay={previewPlaying} isLooping isMuted={previewMuted} useNativeControls={false} />
+                  <View style={styles.compactPlay}><Feather name={previewPlaying ? "pause" : "play"} size={18} color={COLORS.accent} /></View>
+                </Pressable>
+              )}
+              <View style={styles.compactPreviewCopy}>
+                <Text style={styles.compactEyebrow}>SELECTED MEDIA</Text>
+                <Text style={styles.compactTitle}>{mediaType === "video" ? "Video highlight" : "Photo highlight"}</Text>
+                <Pressable onPress={() => setStep(1)} disabled={busy} accessibilityRole="button" accessibilityLabel="Back to replace media" hitSlop={HIT_SLOP}>
+                  <Text style={styles.compactEdit}>Edit media</Text>
+                </Pressable>
+              </View>
+            </View>
           )}
 
-          {/* ── Stage 3 · Highlight details (all optional) ─────────────────── */}
+          {/* Publishing essentials. */}
           <View style={styles.sectionCard}>
-            <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>Highlight details</Text>
-              <Text style={styles.sectionOptional}>Optional</Text>
-            </View>
-
-            {/* Sport — real option list from ATHLETE_TYPES, prefilled from profile */}
             <Text style={styles.fieldLabel} nativeID="create-sport-label">Sport</Text>
-            <View style={styles.chipGridPlain}>
-              {ATHLETE_TYPES.map((t) => (
-                <Chip
-                  key={t}
-                  label={t}
-                  selected={sport === t}
-                  onPress={() => setSport((current) => (current === t ? null : t))}
-                  disabled={busy}
-                />
-              ))}
-            </View>
+            <Pressable onPress={() => setSportPickerOpen((value) => !value)} disabled={busy} accessibilityRole="button" accessibilityLabel={`Sport: ${sport ?? "not selected"}`} accessibilityState={{ expanded: sportPickerOpen, disabled: busy }} style={({ pressed }) => [styles.selector, pressed && { opacity: 0.82 }]}>
+              <Text style={[styles.selectorValue, !sport && styles.selectorPlaceholder]}>{sport ?? "Select a sport"}</Text>
+              <Feather name={sportPickerOpen ? "chevron-up" : "chevron-down"} size={20} color={COLORS.textSecondary} />
+            </Pressable>
+            {sportPickerOpen && <View style={styles.sportGrid}>{ATHLETE_TYPES.map((value) => <Chip key={value} label={value} selected={sport === value} onPress={() => { setSport(value); setSportPickerOpen(false); }} disabled={busy} />)}</View>}
 
-            {/* Position */}
-            <Text style={styles.fieldLabel} nativeID="create-position-label">Position</Text>
-            <TextInput
-              style={styles.fieldInput}
-              placeholder="e.g. QB, Point Guard"
-              placeholderTextColor={COLORS.textMuted}
-              value={position}
-              onChangeText={setPosition}
-              editable={!busy}
-              maxLength={40}
-              accessibilityLabel="Position, optional"
-              accessibilityLabelledBy="create-position-label"
-            />
-
-            {/* School / team */}
-            <Text style={styles.fieldLabel} nativeID="create-school-label">School or team</Text>
-            <TextInput
-              style={styles.fieldInput}
-              placeholder="e.g. Lincoln High"
-              placeholderTextColor={COLORS.textMuted}
-              value={school}
-              onChangeText={setSchool}
-              editable={!busy}
-              maxLength={60}
-              accessibilityLabel="School or team, optional"
-              accessibilityLabelledBy="create-school-label"
-            />
-
-            {/* Caption */}
             <Text style={styles.fieldLabel} nativeID="create-caption-label">Caption</Text>
             <View style={styles.captionWrap}>
               <TextInput
@@ -592,6 +607,19 @@ export default function CreateScreen() {
               />
               <Text style={styles.charCount}>{caption.length}/{MAX_CAPTION}</Text>
             </View>
+          </View>
+
+          <View style={styles.sectionCard}>
+            <Pressable onPress={() => setOptionalDetailsOpen((value) => !value)} disabled={busy} accessibilityRole="button" accessibilityLabel="Optional details" accessibilityState={{ expanded: optionalDetailsOpen, disabled: busy }} style={styles.optionalHeader}>
+              <View><Text style={styles.sectionTitle}>Optional details</Text><Text style={styles.optionalSub}>Add position and school or team</Text></View>
+              <Feather name={optionalDetailsOpen ? "chevron-up" : "chevron-down"} size={20} color={COLORS.textMuted} />
+            </Pressable>
+            {optionalDetailsOpen && <View>
+              <Text style={styles.fieldLabel} nativeID="create-position-label">Position</Text>
+              <TextInput style={styles.fieldInput} placeholder="e.g. QB, Point Guard" placeholderTextColor={COLORS.textMuted} value={position} onChangeText={setPosition} editable={!busy} maxLength={40} accessibilityLabel="Position, optional" accessibilityLabelledBy="create-position-label" />
+              <Text style={styles.fieldLabel} nativeID="create-school-label">School or team</Text>
+              <TextInput style={styles.fieldInput} placeholder="e.g. Lincoln High" placeholderTextColor={COLORS.textMuted} value={school} onChangeText={setSchool} editable={!busy} maxLength={60} accessibilityLabel="School or team, optional" accessibilityLabelledBy="create-school-label" />
+            </View>}
           </View>
 
           {/* ── Stage 4 · Challenge availability ───────────────────────────── */}
@@ -682,11 +710,12 @@ export default function CreateScreen() {
             Only upload footage you have permission to share, and avoid exposing
             private personal information. Posts are visible to everyone on Momentum.
           </Text>
+          </>}
         </ScrollView>
       </KeyboardAvoidingView>
 
       {/* ── Publish footer ──────────────────────────────────────────────────── */}
-      <View style={styles.footer}>
+      {step === 2 && <View style={styles.footer}>
         {/* Upload progress — real values only, layout-stable */}
         {busy && (
           <View style={styles.progressSection} accessible accessibilityLabel={
@@ -717,7 +746,7 @@ export default function CreateScreen() {
         )}
 
         <GlowButton
-          label={publishLabel}
+          label={publishLabel.toUpperCase()}
           onPress={handlePost}
           loading={busy}
           disabled={!mediaUri || busy}
@@ -729,7 +758,7 @@ export default function CreateScreen() {
         {!mediaUri && !busy && (
           <Text style={styles.disabledReason}>Add a photo or video to publish.</Text>
         )}
-      </View>
+      </View>}
     </SafeAreaView>
   );
 }
@@ -771,6 +800,32 @@ const styles = StyleSheet.create({
   nextLabelDisabled: {
     color: COLORS.textMuted,
   },
+  stepper: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: SPACING.xl,
+    paddingVertical: SPACING.md,
+    backgroundColor: COLORS.background,
+  },
+  stepItem: { flexDirection: "row", alignItems: "center", gap: 7 },
+  stepDot: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: COLORS.inputBorder,
+    backgroundColor: COLORS.surface,
+  },
+  stepDotActive: { borderColor: COLORS.accent, backgroundColor: COLORS.accent },
+  stepNumber: { color: COLORS.textMuted, fontSize: TYPE.caption, fontWeight: FONTS.bold },
+  stepNumberActive: { color: COLORS.black, fontSize: TYPE.caption, fontWeight: FONTS.heavy },
+  stepLabel: { color: COLORS.textMuted, fontSize: TYPE.footnote, fontWeight: FONTS.semibold },
+  stepLabelActive: { color: COLORS.textPrimary },
+  stepLine: { width: 54, height: 1, marginHorizontal: SPACING.md, backgroundColor: COLORS.inputBorder },
+  stepLineActive: { backgroundColor: COLORS.accent },
 
   // ── Empty media picker ─────────────────────────────────────────────────────
   emptyPicker: {
@@ -902,6 +957,43 @@ const styles = StyleSheet.create({
     fontSize: TYPE.footnote,
     fontWeight: FONTS.semibold,
   },
+  continueWrap: { marginHorizontal: SPACING.lg, marginTop: SPACING.xs },
+
+  // ── Details media context ─────────────────────────────────────────────────
+  compactPreviewCard: {
+    marginHorizontal: SPACING.lg,
+    marginTop: SPACING.sm,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: SPACING.md,
+    padding: SPACING.sm,
+    borderRadius: RADIUS.lg,
+    borderWidth: 1,
+    borderColor: COLORS.cardBorder,
+    backgroundColor: COLORS.surface,
+  },
+  compactPreview: {
+    width: 92,
+    height: 108,
+    borderRadius: RADIUS.md,
+    overflow: "hidden",
+    backgroundColor: COLORS.surfaceDeep,
+  },
+  compactPlay: {
+    position: "absolute",
+    alignSelf: "center",
+    top: 38,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.scrimBadge,
+  },
+  compactPreviewCopy: { flex: 1, alignItems: "flex-start", gap: 4 },
+  compactEyebrow: { color: COLORS.textMuted, fontSize: TYPE.micro, fontWeight: FONTS.bold, letterSpacing: 0.8 },
+  compactTitle: { color: COLORS.textPrimary, fontSize: TYPE.callout, fontWeight: FONTS.heavy },
+  compactEdit: { color: COLORS.accent, fontSize: TYPE.footnote, fontWeight: FONTS.bold, marginTop: 5 },
 
   // ── Section cards ──────────────────────────────────────────────────────────
   sectionCard: {
@@ -955,6 +1047,22 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
     gap: SPACING.sm,
   },
+  selector: {
+    minHeight: 52,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: SPACING.md,
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: COLORS.inputBorder,
+    backgroundColor: COLORS.input,
+  },
+  selectorValue: { color: COLORS.textPrimary, fontSize: TYPE.base, fontWeight: FONTS.semibold },
+  selectorPlaceholder: { color: COLORS.textMuted, fontWeight: FONTS.regular },
+  sportGrid: { flexDirection: "row", flexWrap: "wrap", gap: SPACING.sm, paddingTop: SPACING.md },
+  optionalHeader: { minHeight: 48, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  optionalSub: { color: COLORS.textMuted, fontSize: TYPE.small, marginTop: 3 },
 
   // ── Caption ────────────────────────────────────────────────────────────────
   captionWrap: {

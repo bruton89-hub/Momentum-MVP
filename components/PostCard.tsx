@@ -5,9 +5,9 @@ import {
   Pressable,
   StyleSheet,
   Dimensions,
-  Alert,
-  Image,
+  Share,
 } from "react-native";
+import { showAlert, copyToClipboard } from "@/utils/alert";
 import { ResizeMode, Video } from "expo-av";
 import { LinearGradient } from "expo-linear-gradient";
 import { useRouter } from "expo-router";
@@ -43,6 +43,8 @@ import AvatarImage from "./AvatarImage";
 import MediaTile from "./MediaTile";
 import SportBadge, { SportBadgeVariant } from "./SportBadge";
 import PressableScale from "./PressableScale";
+import PostOwnerMenu from "./PostOwnerMenu";
+import { usePostSave } from "@/hooks/useSaves";
 import { openAthleteProfile } from "@/utils/navigation";
 import { toHandle, formatRelativeTime } from "@/utils/format";
 import {
@@ -85,6 +87,8 @@ interface Props {
    * effects so inactive cards stay visually correct but quiet.
    */
   isActiveCard?: boolean;
+  /** Called after the server has permanently deleted this owned post. */
+  onDeleted?: (postId: string) => void;
 }
 
 /** Compact count for the action rail: 1400 → "1.4K". */
@@ -126,6 +130,7 @@ function PostCard({
   authorAvatarOverride,
   height,
   isActiveCard = false,
+  onDeleted,
 }: Props) {
   const router = useRouter();
   const videoRef = useRef<Video>(null);
@@ -133,7 +138,7 @@ function PostCard({
   const [mediaError, setMediaError] = useState(false);
   const [thumbnailUri, setThumbnailUri] = useState("");
   const [isMuted, setIsMuted] = useState(true);
-  const [isSaved, setIsSaved] = useState(false);
+  const [ownerMenuOpen, setOwnerMenuOpen] = useState(false);
   const lastTap = useRef(0);
   const handleMediaError = useCallback(() => setMediaError(true), []);
   const pageHeight = height ?? SCREEN_H;
@@ -269,11 +274,21 @@ function PostCard({
     setMediaError(false);
     setThumbnailUri("");
     setIsMuted(true);
-    setIsSaved(false);
   }, [post.id, normalizedMediaUrl]);
+
+  // ── Poster frame ──────────────────────────────────────────────────────────
+  // The author's chosen cover wins; a generated first-frame thumbnail is the
+  // fallback. Previously a cover replaced the <Video> with a static <Image>,
+  // so picking a cover silently turned the highlight into a still photo that
+  // never played for anyone. It's a poster now — the video still plays.
+  // normalizePost has already discarded any non-remote (file://) cover.
+  const authorCoverUri = post.videoEdit?.coverUri || "";
+  const posterUri = authorCoverUri || thumbnailUri;
 
   useEffect(() => {
     let cancelled = false;
+    // A remote cover already gives us a poster — skip the decode entirely.
+    if (authorCoverUri) return;
     if (!postIsVideo || !normalizedMediaUrl || !mediaUrlValid) return;
 
     getVideoThumbnailUri(normalizedMediaUrl)
@@ -285,7 +300,7 @@ function PostCard({
     return () => {
       cancelled = true;
     };
-  }, [mediaUrlValid, normalizedMediaUrl, postIsVideo]);
+  }, [authorCoverUri, mediaUrlValid, normalizedMediaUrl, postIsVideo]);
 
   useEffect(() => {
     if (!isActive) {
@@ -339,17 +354,63 @@ function PostCard({
     handleDoubleTap();
   }
 
+  // Save state is server-backed and shared across every mounted card (see
+  // hooks/useSaves). It used to be local component state that reset whenever
+  // the card unmounted, so "Saved" was a lie that vanished on scroll.
+  const {
+    saved: isSaved,
+    toggle: toggleSave,
+    canSave,
+  } = usePostSave(post.id, currentUserId ?? null);
+
+  /**
+   * Share the highlight.
+   *
+   * The deep link points at the athlete's profile because that's the only
+   * route that exists — there is no /post/[id] screen, so linking to one would
+   * hand recipients a dead URL.
+   *
+   * On web, RN's Share delegates to navigator.share and REJECTS outright in
+   * browsers that don't implement it (or outside a secure context). An
+   * unhandled rejection there would leave the tap silently doing nothing, so
+   * the catch falls back to the clipboard and says so.
+   */
+  const handleShare = useCallback(async () => {
+    const identity = [post.sport, post.position, post.school]
+      .filter(Boolean)
+      .join(" · ");
+    const message = [
+      `${post.username}${identity ? ` (${identity})` : ""} on Momentum.`,
+      post.caption?.trim() ? `"${post.caption.trim()}"` : "Watch the highlight.",
+      `Open in Momentum: momentum://profile/${post.userId}`,
+    ].join("\n");
+
+    try {
+      await Share.share({ title: `${post.username} on Momentum`, message });
+    } catch {
+      const copied = await copyToClipboard(message);
+      showAlert(
+        copied ? "Link copied" : "Sharing unavailable",
+        copied
+          ? "The highlight link is on your clipboard — paste it anywhere."
+          : "Sharing isn't supported in this browser. Try the app instead."
+      );
+    }
+  }, [post.caption, post.position, post.school, post.sport, post.userId, post.username]);
+
   const handleSave = useCallback(() => {
-    setIsSaved((saved) => {
-      if (!saved && !reducedMotion) {
-        savePulse.value = withSequence(
-          withSpring(1.3, { damping: 9, stiffness: 320 }),
-          withSpring(1, { damping: 14 })
-        );
-      }
-      return !saved;
-    });
-  }, [reducedMotion, savePulse]);
+    if (!canSave) {
+      showAlert("Sign in required", "Please sign in to save highlights.");
+      return;
+    }
+    if (!isSaved && !reducedMotion) {
+      savePulse.value = withSequence(
+        withSpring(1.3, { damping: 9, stiffness: 320 }),
+        withSpring(1, { damping: 14 })
+      );
+    }
+    void toggleSave();
+  }, [canSave, isSaved, reducedMotion, savePulse, toggleSave]);
 
   const handle = toHandle(post.username);
   const authorAvatar =
@@ -407,18 +468,11 @@ function PostCard({
             : "Photo. Double-tap to like."
         }
       >
-        {postIsVideo && post.videoEdit?.coverUri ? (
-          <Image
-            source={{ uri: post.videoEdit.coverUri }}
-            style={styles.media}
-            resizeMode="cover"
-            onError={handleMediaError}
-          />
-        ) : postIsVideo && normalizedMediaUrl && !mediaError && mountVideoPlayer ? (
+        {postIsVideo && normalizedMediaUrl && !mediaError && mountVideoPlayer ? (
           // Only the visible/next card owns a native player. Other video cards
           // remain lightweight thumbnail tiles until they approach the viewport.
           <Video
-            key={`${post.id}:${thumbnailUri ? "poster" : "pending"}`}
+            key={`${post.id}:${posterUri ? "poster" : "pending"}`}
             ref={videoRef}
             source={{ uri: normalizedMediaUrl }}
             style={styles.media}
@@ -427,8 +481,8 @@ function PostCard({
             isLooping
             isMuted={isMuted}
             useNativeControls={false}
-            usePoster={!!thumbnailUri}
-            posterSource={thumbnailUri ? { uri: thumbnailUri } : undefined}
+            usePoster={!!posterUri}
+            posterSource={posterUri ? { uri: posterUri } : undefined}
             posterStyle={styles.videoPoster}
             onError={handleMediaError}
           />
@@ -653,20 +707,31 @@ function PostCard({
             onPress={() =>
               onComment
                 ? onComment(post)
-                : Alert.alert("Comments", "Comments coming soon.")
+                : showAlert("Comments", "Comments coming soon.")
             }
             style={styles.railBtn}
           >
             <Feather name="message-circle" size={33} color={COLORS.white} style={styles.railIconShadow} />
-            <Text style={styles.railCount}>{formatCount(post.commentsCount ?? 0)}</Text>
+            {/* No counter is maintained for comments: nothing in the app or in
+                Cloud Functions ever writes post.commentsCount, so rendering
+                `?? 0` displayed a confident "0" under every post regardless of
+                how many comments it actually had. Show the label until a real
+                counter exists (see docs/handoff.md). */}
+            <Text style={styles.railCount}>
+              {typeof post.commentsCount === "number"
+                ? formatCount(post.commentsCount)
+                : "Comment"}
+            </Text>
           </PressableScale>
 
-          {/* Share */}
+          {/* Share — had no onPress at all until now: it rendered, animated on
+              press, announced itself to screen readers, and did nothing. */}
           <PressableScale
             scaleTo={0.8}
             hitSlop={HIT_SLOP}
             accessibilityRole="button"
-            accessibilityLabel="Share this highlight"
+            accessibilityLabel={`Share ${post.username}'s highlight`}
+            onPress={handleShare}
             style={styles.railBtn}
           >
             <Feather name="send" size={31} color={COLORS.white} style={styles.railIconShadow} />
@@ -697,6 +762,27 @@ function PostCard({
               {isSaved ? "Saved" : "Save"}
             </Text>
           </PressableScale>
+
+          {/* Owner-only overflow. The destructive action lives behind a
+              second explicit confirmation in PostOwnerMenu. */}
+          {isOwnPost && (
+            <PressableScale
+              scaleTo={0.8}
+              hitSlop={HIT_SLOP}
+              accessibilityRole="button"
+              accessibilityLabel="Post options"
+              onPress={() => setOwnerMenuOpen(true)}
+              style={styles.railBtn}
+            >
+              <Feather
+                name="more-horizontal"
+                size={32}
+                color={COLORS.white}
+                style={styles.railIconShadow}
+              />
+              <Text style={styles.railCount}>More</Text>
+            </PressableScale>
+          )}
 
           {/* Challenge — Momentum's signature interaction */}
           {showBattleBtn && (
@@ -749,6 +835,17 @@ function PostCard({
         >
           <Feather name={isMuted ? "volume-x" : "volume-2"} size={13} color={COLORS.white} />
         </Animated.View>
+      )}
+
+      {isOwnPost && (
+        <PostOwnerMenu
+          postId={post.id}
+          visible={ownerMenuOpen}
+          onClose={() => setOwnerMenuOpen(false)}
+          onDeleted={(postId) => onDeleted?.(postId)}
+          onError={(message) => showAlert("Couldn’t delete post", message)}
+          onWarning={(message) => showAlert("Post deleted", message)}
+        />
       )}
     </View>
   );

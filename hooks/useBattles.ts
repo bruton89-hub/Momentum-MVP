@@ -18,7 +18,7 @@ import { httpsCallable } from "firebase/functions";
 import { auth, db, functions } from "@/config/firebase";
 import { notifyBattleResults } from "@/services/notificationRepository";
 import { startDevMetricTimer } from "@/utils/performance";
-import type { Battle, BattlePlayer, Vote } from "@/types";
+import type { Battle, BattlePlayer, BattleStatus, Vote } from "@/types";
 
 // ─── Server-authoritative finalization ───────────────────────────────────────
 // Closing a battle (status/winner/statsRecorded) and recording wins/losses is
@@ -27,7 +27,8 @@ import type { Battle, BattlePlayer, Vote } from "@/types";
 // them here — we just ask the server to do it.
 type FinalizeBattleResult = {
   battleId: string;
-  status: "finalized" | "already_recorded";
+  /** "expired" = the window closed with no opponent; no stats were recorded. */
+  status: "finalized" | "already_recorded" | "expired";
   winner: string | null;
 };
 
@@ -182,7 +183,7 @@ function normalizeBattle(id: string, data: Record<string, unknown>): Battle {
     creatorId:      typeof data.creatorId      === "string" ? data.creatorId      : "",
     votesA:         typeof data.votesA         === "number" ? data.votesA         : 0,
     votesB:         typeof data.votesB         === "number" ? data.votesB         : 0,
-    status:         (["open", "live", "completed"] as const).includes(
+    status:         (["open", "live", "completed", "expired"] as const).includes(
                       data.status as Battle["status"]
                     )
                     ? (data.status as Battle["status"])
@@ -224,18 +225,46 @@ export function isBattleExpired(battle: Battle): boolean {
   return Date.now() > endMs;
 }
 
+// ─── Helper: did anyone actually accept this challenge? ──────────────────────
+/**
+ * True only when a real opponent exists. This is the line between a contest
+ * and an invitation nobody answered — everything that counts (Completed lists,
+ * battle totals, records) gates on it.
+ */
+export function isMatchedBattle(battle: Battle): boolean {
+  return !!battle.playerB?.userId && !!battle.playerA?.userId;
+}
+
 // ─── Helper: derive logical status (accounts for expiry) ─────────────────────
 // Always use this instead of battle.status directly when rendering UI.
 // Rules:
-//   "completed" if stored status is completed OR battle has expired
+//   "expired"   if the window closed and no opponent ever accepted
+//   "completed" if stored status is completed OR a MATCHED battle has expired
 //   "live"      if playerA + playerB present and not expired
 //   "open"      if playerB is missing and not expired
+//
+// The unmatched case is checked first and deliberately overrides a stored
+// status of "completed": battles finalized before the expired status existed
+// are still sitting in Firestore marked completed, and this reclassifies them
+// on read so they disappear from the UI without waiting for the backfill.
 
-export function getBattleStatus(battle: Battle): "open" | "live" | "completed" {
+export function getBattleStatus(battle: Battle): BattleStatus {
+  if (battle.status === "expired") return "expired";
+  const expired = isBattleExpired(battle);
+  if (!isMatchedBattle(battle)) {
+    // Never accepted. Expired once its window closed; otherwise still open.
+    return expired || battle.status === "completed" ? "expired" : "open";
+  }
   if (battle.status === "completed") return "completed";
-  if (isBattleExpired(battle)) return "completed";
+  if (expired) return "completed";
   if (battle.status === "live") return "live";
   return "open";
+}
+
+/** Battles that count: matched contests, live or completed. */
+export function isCountableBattle(battle: Battle): boolean {
+  const status = getBattleStatus(battle);
+  return status === "live" || status === "completed";
 }
 
 // ─── Helper: human-readable time remaining / elapsed ─────────────────────────
@@ -623,10 +652,16 @@ export function useBattles(
         // `functions/unauthenticated`. Skipping here prevents that call entirely
         // for signed-out viewers and during that startup gap.
         const authedUser = auth.currentUser;
+        // Expired-unmatched battles are finalized too, so the server can write
+        // status:"expired" once and this stops being a per-read reclassification
+        // on every device forever. finalizeBattle records no stats for them.
         const finalizable = currentUserId && authedUser
           ? fetched.filter(
               (battle) =>
-                getBattleStatus(battle) === "completed" && !battle.statsRecorded
+                (getBattleStatus(battle) === "completed" ||
+                  (getBattleStatus(battle) === "expired" &&
+                    battle.status !== "expired")) &&
+                !battle.statsRecorded
                 // Session guard: never re-attempt a battle already tried this
                 // session (survives remounts/focus), until auth changes or a
                 // manual refresh clears the guard.

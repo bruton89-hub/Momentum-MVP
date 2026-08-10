@@ -10,6 +10,8 @@ export interface UserProfile {
   username: string;
   avatar: string;
   avatarUrl?: string;
+  /** Uploaded profile banner. Absent → a sport-themed gradient renders instead. */
+  bannerUrl?: string;
   athleteType: string;
   sport?: string;
   bio: string;
@@ -114,7 +116,15 @@ export interface BattlePlayer {
   postId: string;
 }
 
-export type BattleStatus = "open" | "live" | "completed";
+/**
+ * "expired" = an open challenge whose window closed with no opponent.
+ *
+ * Distinct from "completed" on purpose. A challenge nobody accepted was never
+ * a contest, so it must not appear in Completed, count toward an athlete's
+ * battle total, or influence a record. Treating the two as the same thing is
+ * what put "Waiting for challenger" cards in the Completed tab.
+ */
+export type BattleStatus = "open" | "live" | "completed" | "expired";
 
 export interface Battle {
   id: string;

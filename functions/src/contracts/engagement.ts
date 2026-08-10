@@ -1,5 +1,6 @@
 export const SET_POST_LIKE_COMMAND = "setPostLike" as const;
 export const CAST_BATTLE_VOTE_COMMAND = "castBattleVote" as const;
+export const DELETE_POST_COMMAND = "deletePost" as const;
 
 export type EngagementOutcome = "applied" | "already_applied";
 export type BattleVoteSide = "A" | "B";
@@ -29,4 +30,20 @@ export interface CastBattleVoteResponse {
   votesA: number;
   votesB: number;
   outcome: EngagementOutcome;
+}
+
+export interface DeletePostRequest {
+  postId: string;
+}
+
+export interface DeletePostResponse {
+  postId: string;
+  outcome: EngagementOutcome;
+  deleted: {
+    comments: number;
+    likes: number;
+    notifications: number;
+  };
+  mediaCleanupComplete: boolean;
+  mediaRetainedForBattleHistory: boolean;
 }

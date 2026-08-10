@@ -201,6 +201,25 @@ test("current rules limit post owner updates to editable fields", async () => {
   );
 });
 
+test("current rules allow a post owner to delete their post", async () => {
+  await seed(current, [["posts/post-a", post]]);
+  await assertSucceeds(
+    deleteDoc(doc(authenticatedDb(current, "user-a"), "posts/post-a"))
+  );
+});
+
+test("current rules deny another authenticated user deleting a post", async () => {
+  await seed(current, [["posts/post-a", post]]);
+  await assertFails(
+    deleteDoc(doc(authenticatedDb(current, "user-b"), "posts/post-a"))
+  );
+});
+
+test("current rules deny unauthenticated post deletion", async () => {
+  await seed(current, [["posts/post-a", post]]);
+  await assertFails(deleteDoc(doc(unauthenticatedDb(current), "posts/post-a")));
+});
+
 test("hardened fixture limits post owner updates to editable fields", async () => {
   await seed(hardened, [["posts/post-a", post]]);
   const db = authenticatedDb(hardened, "user-a");
@@ -335,6 +354,69 @@ test("current and hardened rules preserve follow creation and deletion", async (
       })
     );
     await assertSucceeds(deleteDoc(followRef));
+  }
+});
+
+test("current and hardened rules let an owner save and unsave a post", async () => {
+  for (const environment of [current, hardened]) {
+    const db = authenticatedDb(environment, "user-a");
+    const saveRef = doc(db, "saves/post-1_user-a");
+    await assertSucceeds(
+      setDoc(saveRef, { postId: "post-1", userId: "user-a" })
+    );
+    await assertSucceeds(getDoc(saveRef));
+    await assertSucceeds(deleteDoc(saveRef));
+  }
+});
+
+test("saves are private — nobody else may read or delete them", async () => {
+  for (const environment of [current, hardened]) {
+    await seed(environment, [
+      ["saves/post-1_user-a", { postId: "post-1", userId: "user-a" }],
+    ]);
+    const otherDb = authenticatedDb(environment, "user-b");
+    const saveRef = doc(otherDb, "saves/post-1_user-a");
+    await assertFails(getDoc(saveRef));
+    await assertFails(deleteDoc(saveRef));
+    await assertFails(getDoc(doc(unauthenticatedDb(environment), "saves/post-1_user-a")));
+  }
+});
+
+test("saves reject a mismatched owner or doc id", async () => {
+  for (const environment of [current, hardened]) {
+    const db = authenticatedDb(environment, "user-a");
+    // Saving on someone else's behalf.
+    await assertFails(
+      setDoc(doc(db, "saves/post-1_user-b"), {
+        postId: "post-1",
+        userId: "user-b",
+      })
+    );
+    // Doc id that doesn't match {postId}_{uid} — would break idempotency.
+    await assertFails(
+      setDoc(doc(db, "saves/arbitrary-id"), {
+        postId: "post-1",
+        userId: "user-a",
+      })
+    );
+    // Missing postId.
+    await assertFails(
+      setDoc(doc(db, "saves/post-1_user-a"), { userId: "user-a" })
+    );
+  }
+});
+
+test("saves are immutable — no in-place edits", async () => {
+  for (const environment of [current, hardened]) {
+    await seed(environment, [
+      ["saves/post-1_user-a", { postId: "post-1", userId: "user-a" }],
+    ]);
+    await assertFails(
+      updateDoc(
+        doc(authenticatedDb(environment, "user-a"), "saves/post-1_user-a"),
+        { postId: "post-2" }
+      )
+    );
   }
 });
 

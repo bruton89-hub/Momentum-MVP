@@ -6,11 +6,11 @@ import {
   StyleSheet,
   Pressable,
   RefreshControl,
-  Alert,
   Modal,
   ViewToken,
   LayoutChangeEvent,
 } from "react-native";
+import { showAlert, confirm } from "@/utils/alert";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
@@ -25,6 +25,7 @@ import { timestampToMs } from "@/services/postRepository";
 import { COLORS, SPACING, FONTS, SCRIMS } from "@/constants/theme";
 import PostCard from "@/components/PostCard";
 import BattlePickerModal from "@/components/BattlePickerModal";
+import CommentsSheet from "@/components/CommentsSheet";
 import EmptyState from "@/components/EmptyState";
 import FeedSkeleton from "@/components/FeedSkeleton";
 import GlowButton from "@/components/GlowButton";
@@ -32,6 +33,7 @@ import IconButton from "@/components/IconButton";
 import DiscoveryTabs, { DiscoveryTabDef } from "@/components/DiscoveryTabs";
 import { isVideoMedia } from "@/utils/media";
 import type { Post } from "@/types";
+import { isPostDeleted } from "@/services/postDeletion";
 
 // ─── Discovery tabs ─────────────────────────────────────────────────────────────
 // "forYou" / "following" keep their original feeds. "battles" filters the
@@ -116,10 +118,13 @@ export default function HomeScreen() {
     refreshing: fyRefreshing,
     error:      fyError,
     refresh:    fyRefresh,
+    refreshIfStale: fyRefreshIfStale,
     loadMore:   fyLoadMore,
     hasMore:    fyHasMore,
     handleLike,
-  } = usePosts(userId, followedIds);
+    // The viewer's profile drives the relevance term (same sport / school /
+    // state). Ranking degrades to recency + engagement while it hydrates.
+  } = usePosts(userId, followedIds, profile);
 
   // ── Following feed ────────────────────────────────────────────────────────────
   const {
@@ -127,6 +132,7 @@ export default function HomeScreen() {
     loading:    followingLoading,
     refreshing: followingRefreshing,
     refresh:    followingRefresh,
+    refreshIfStale: followingRefreshIfStale,
   } = useFollowingPosts(userId, followedIds, followsLoading);
 
   // ── Battles discovery source ──────────────────────────────────────────────────
@@ -154,6 +160,14 @@ export default function HomeScreen() {
     [router]
   );
 
+  // ── Comment thread ────────────────────────────────────────────────────────
+  // Held as screen state rather than per-card state so only one sheet can be
+  // mounted at a time, and so a card scrolling out of the window can't take
+  // an open thread with it.
+  const [commentsPost, setCommentsPost] = useState<Post | null>(null);
+  const openComments = useCallback((post: Post) => setCommentsPost(post), []);
+  const closeComments = useCallback(() => setCommentsPost(null), []);
+
   // ── Refresh on tab focus (Expo Router tabs don't remount) ────────────────────
   // All callbacks stored in refs so useFocusEffect only depends on the stable
   // `feedTab` string — prevents the setState→rerender→new fn→re-run loop.
@@ -162,10 +176,13 @@ export default function HomeScreen() {
   // that follows made from the player profile screen are reflected immediately
   // when the user returns to Home. When followedIds changes, useFollowingPosts
   // automatically re-queries Firestore for the new set of followed users.
-  const fyRefreshRef = useRef(fyRefresh);
-  fyRefreshRef.current = fyRefresh;
-  const followingRefreshRef = useRef(followingRefresh);
-  followingRefreshRef.current = followingRefresh;
+  // Focus uses the staleness-gated variants; pull-to-refresh keeps the
+  // unconditional ones. Publishing marks the pool stale, so a new highlight
+  // still appears immediately on return to Home.
+  const fyRefreshRef = useRef(fyRefreshIfStale);
+  fyRefreshRef.current = fyRefreshIfStale;
+  const followingRefreshRef = useRef(followingRefreshIfStale);
+  followingRefreshRef.current = followingRefreshIfStale;
   const battlesRefreshRef = useRef(battlesRefresh);
   battlesRefreshRef.current = battlesRefresh;
   const refreshUnreadRef = useRef(refreshUnread);
@@ -209,10 +226,14 @@ export default function HomeScreen() {
 
     battles.forEach((battle) => {
       const status = getBattleStatus(battle);
+      // Unmatched challenges that ran out the clock never became battles, so
+      // their posts don't belong in the Battles tab.
+      if (status === "expired") return;
       const priority = STATUS_RANK[status] ?? 3; // unknown → after completed, still rendered
       const createdMs = timestampToMs(battle.createdAt);
       [battle.playerA, battle.playerB].forEach((player) => {
         if (!player?.postId || !player.mediaUrl?.trim()) return;
+        if (isPostDeleted(player.postId)) return;
         const isWinner = status === "completed" && !!battle.winner && battle.winner === player.userId;
         const resolved = poolById.get(player.postId);
         const post: Post = resolved
@@ -353,10 +374,10 @@ export default function HomeScreen() {
             category:      "Highlights",
             durationHours: 24,
           });
-          Alert.alert("Challenge open", "Your post is now open for challenges.");
+          showAlert("Challenge open", "Your post is now open for challenges.");
         } catch (err) {
           console.error("Start battle failed", err);
-          Alert.alert("Failed", "Could not create battle. Please try again.");
+          showAlert("Failed", "Could not create battle. Please try again.");
         } finally {
           startingBattleRef.current = null;
           setStartingBattlePostId(null);
@@ -430,6 +451,10 @@ export default function HomeScreen() {
         height={pageHeight}
         isLiked={likedIds.has(item.id)}
         onLike={handleLike}
+        // Without this the rail's Comment button fell through to PostCard's
+        // "Comments coming soon" placeholder — on a feature that is fully
+        // built and already reachable from the post detail modal.
+        onComment={openComments}
         currentUserId={userId}
         isFollowing={followedIds.has(item.userId)}
         onFollow={handleFollow}
@@ -446,6 +471,7 @@ export default function HomeScreen() {
       pageHeight,
       likedIds,
       handleLike,
+      openComments,
       userId,
       followedIds,
       handleFollow,
@@ -605,6 +631,14 @@ export default function HomeScreen() {
           </Text>
         </View>
       ) : null}
+
+      {/* Comment thread — mounts only when a post's Comment button is tapped */}
+      <CommentsSheet
+        visible={!!commentsPost}
+        post={commentsPost}
+        currentUserId={userId}
+        onClose={closeComments}
+      />
 
       {/* Challenge picker modal — only mounts when a target post is set */}
       <BattlePickerModal

@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit",
     "test:rules": "node scripts/run-firestore-rules-tests.js",
     "test:functions:emulator": "npm --prefix functions run build && CI=1 XDG_CONFIG_HOME=$PWD/.firebase-config XDG_CACHE_HOME=$PWD/.firebase-cache FIREBASE_EMULATORS_PATH=$PWD/.firebase-data firebase emulators:exec --project demo-momentum-phase0 --only functions \"FUNCTIONS_EMULATOR=true npm --prefix functions run test:contracts\"",
-    "verify": "npm run typecheck && npm --prefix functions run build && npm run test:rules && npm run test:functions:emulator"
+    "verify": "npm run typecheck && npm run test:battles && npm --prefix functions run build && npm run test:rules && npm run test:functions:emulator",
+    "test:battles": "node --test test/battleSections.test.js"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "1.21.0",

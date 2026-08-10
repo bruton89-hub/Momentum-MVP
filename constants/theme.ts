@@ -125,6 +125,43 @@ export const SCRIMS: { top: string[]; bottom: string[]; rail: string[] } = {
   rail: ["rgba(0,0,0,0)", "rgba(0,0,0,0.28)"],
 };
 
+/**
+ * Profile banner fallbacks — one gradient per sport, used until an athlete
+ * uploads their own banner. Every profile gets a deliberate look on day one
+ * instead of an empty bar, and the sport is legible at a glance.
+ *
+ * Each ramp ends near-black so the avatar, name, and badges that sit over the
+ * lower half of the banner keep their contrast without an extra scrim.
+ */
+export const SPORT_BANNERS: Record<string, readonly [string, string, string]> = {
+  Basketball: ["#7A3B00", "#331700", "#0A0A0A"],
+  Football: ["#0B4F2A", "#082B18", "#0A0A0A"],
+  Soccer: ["#053B52", "#04222E", "#0A0A0A"],
+  "Track & Field": ["#5B1E5B", "#2C0F2C", "#0A0A0A"],
+  Baseball: ["#123A6B", "#0A2140", "#0A0A0A"],
+  Wrestling: ["#6B1414", "#3A0B0B", "#0A0A0A"],
+  Tennis: ["#4C5F00", "#2A3500", "#0A0A0A"],
+  Swimming: ["#00495C", "#002932", "#0A0A0A"],
+  Volleyball: ["#7A4A00", "#3D2500", "#0A0A0A"],
+  Gymnastics: ["#4A1D63", "#291036", "#0A0A0A"],
+  Other: ["#242424", "#141414", "#0A0A0A"],
+};
+
+/** Gradient for an athlete's sport, falling back to the neutral ramp. */
+export function bannerGradientForSport(
+  sport?: string | null
+): readonly [string, string, string] {
+  if (!sport) return SPORT_BANNERS.Other;
+  return SPORT_BANNERS[sport] ?? SPORT_BANNERS.Other;
+}
+
+/** Scrim laid over an uploaded banner so overlaid text stays readable. */
+export const BANNER_SCRIM: string[] = [
+  "rgba(0,0,0,0.10)",
+  "rgba(0,0,0,0.45)",
+  "rgba(0,0,0,0.88)",
+];
+
 /** Likes needed before a post earns the 🔥 Trending badge. */
 export const TRENDING_LIKES_THRESHOLD = 25;
 

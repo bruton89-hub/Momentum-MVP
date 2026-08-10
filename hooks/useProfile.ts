@@ -16,10 +16,42 @@ import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { Platform } from "react-native";
 import { db, storage } from "@/config/firebase";
 import { startDevTimer } from "@/utils/performance";
+import {
+  loadMediaBlob,
+  mediaSourceUri,
+  type MediaUploadSource,
+} from "@/utils/mediaUpload";
 import type { UserProfile } from "@/types";
 
 const MAX_AVATAR_BYTES = 10 * 1024 * 1024;
+const MAX_BANNER_BYTES = 10 * 1024 * 1024;
 const SUPPORTED_AVATAR_URI = /^(file|content|ph|assets-library|blob|data|https?):/i;
+
+// ─── Search index fields ──────────────────────────────────────────────────────
+// Firestore has no text search. Prefix matching is done with a range query
+// (>= term, < term + ''), which requires a lowercased, trimmed copy of
+// each searchable field — queries are case-sensitive and can only anchor at the
+// start of a value.
+//
+// Written on every profile create and update so the index can never drift from
+// the display values. `scripts/backfill-search-fields.js` covers existing docs.
+export interface ProfileSearchFields {
+  usernameLower: string;
+  schoolLower: string;
+  cityLower: string;
+}
+
+export function searchFieldsFor(input: {
+  username?: string;
+  school?: string;
+  city?: string;
+}): ProfileSearchFields {
+  return {
+    usernameLower: (input.username ?? "").trim().toLowerCase(),
+    schoolLower: (input.school ?? "").trim().toLowerCase(),
+    cityLower: (input.city ?? "").trim().toLowerCase(),
+  };
+}
 
 // ─── Create or refresh a user profile ────────────────────────────────────────
 
@@ -47,13 +79,23 @@ export async function ensureUserProfile(
     losses: 0,
     createdAt: null,
   };
-  await setDoc(ref, { ...profile, createdAt: serverTimestamp() });
+  await setDoc(ref, {
+    ...profile,
+    ...searchFieldsFor({ username }),
+    createdAt: serverTimestamp(),
+  });
   return { userId, ...profile };
 }
 
 export async function isUsernameTaken(username: string, excludeUserId?: string): Promise<boolean> {
+  // Case-insensitive: "ChrisFly" and "chrisfly" are the same handle to a human,
+  // so treating them as distinct would let one athlete impersonate another.
   const snap = await getDocs(
-    query(collection(db, "users"), where("username", "==", username), limit(1))
+    query(
+      collection(db, "users"),
+      where("usernameLower", "==", username.trim().toLowerCase()),
+      limit(5)
+    )
   );
   return snap.docs.some((userDoc) => userDoc.id !== excludeUserId);
 }
@@ -73,8 +115,23 @@ export interface UserProfileUpdates {
   username?: string;
   bio?: string;
   sport?: string;
+  athleteType?: string;
   avatarUrl?: string;
   avatar?: string;
+  bannerUrl?: string;
+  // ── Prefix-search index (see searchFieldsFor). Always written alongside the
+  //    display fields they mirror so the two can never drift apart.
+  usernameLower?: string;
+  schoolLower?: string;
+  cityLower?: string;
+  // ── Athlete identity. Written as "" to clear a field rather than deleted, so
+  //    normalizeUserProfile's `|| undefined` collapses them back to absent.
+  position?: string;
+  school?: string;
+  teamName?: string;
+  city?: string;
+  state?: string;
+  gradYear?: string;
   updatedAt?: FieldValue;
 }
 
@@ -88,9 +145,9 @@ export async function updateUserProfile(
   await updateDoc(doc(db, "users", userId), { ...updates });
 }
 
-export async function uploadUserAvatar(uri: string, userId: string): Promise<string> {
+export async function uploadUserAvatar(source: MediaUploadSource, userId: string): Promise<string> {
   const safeUserId = userId.trim();
-  const safeUri = uri.trim();
+  const safeUri = mediaSourceUri(source).trim();
   if (!safeUserId) {
     throw new Error("You must be signed in to upload a profile image.");
   }
@@ -103,7 +160,7 @@ export async function uploadUserAvatar(uri: string, userId: string): Promise<str
 
   let blob: Blob | null = null;
   try {
-    blob = await avatarUriToBlob(safeUri);
+    blob = await loadMediaBlob(source, Platform.OS);
     if (!blob.size) {
       throw new Error("The selected profile image is empty.");
     }
@@ -137,38 +194,58 @@ export async function uploadUserAvatar(uri: string, userId: string): Promise<str
   }
 }
 
-async function avatarUriToBlob(uri: string): Promise<Blob> {
-  if (
-    Platform.OS === "web" ||
-    uri.startsWith("http://") ||
-    uri.startsWith("https://") ||
-    uri.startsWith("blob:") ||
-    uri.startsWith("data:")
-  ) {
-    const response = await fetch(uri);
-    if (!response.ok) {
-      throw new Error(`Could not read the selected profile image (${response.status}).`);
-    }
-    return response.blob();
+/**
+ * Upload a profile banner. Deliberately mirrors uploadUserAvatar — same
+ * validation, same blob handling, same native Blob release — but writes to
+ * `banners/{userId}/banner.jpg` so Storage rules can size- and type-gate the
+ * two independently.
+ */
+export async function uploadUserBanner(source: MediaUploadSource, userId: string): Promise<string> {
+  const safeUserId = userId.trim();
+  const safeUri = mediaSourceUri(source).trim();
+  if (!safeUserId) {
+    throw new Error("You must be signed in to upload a banner.");
+  }
+  if (!safeUri) {
+    throw new Error("No banner image was selected.");
+  }
+  if (!SUPPORTED_AVATAR_URI.test(safeUri)) {
+    throw new Error("The selected banner has an invalid file URI.");
   }
 
-  // Native fetch() is unreliable for iOS file:// and Photos-library URIs.
-  return new Promise<Blob>((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.onload = () => {
-      const result = xhr.response as Blob | null;
-      if (!result) {
-        reject(new Error("Could not read the selected profile image."));
-        return;
-      }
-      resolve(result);
-    };
-    xhr.onerror = () => reject(new Error("Could not read the selected profile image."));
-    xhr.onabort = () => reject(new Error("Reading the selected profile image was canceled."));
-    xhr.responseType = "blob";
-    xhr.open("GET", uri, true);
-    xhr.send(null);
-  });
+  let blob: Blob | null = null;
+  try {
+    blob = await loadMediaBlob(source, Platform.OS);
+    if (!blob.size) {
+      throw new Error("The selected banner is empty.");
+    }
+    if (blob.size >= MAX_BANNER_BYTES) {
+      throw new Error("Banners must be smaller than 10 MB.");
+    }
+    if (blob.type && !blob.type.toLowerCase().startsWith("image/")) {
+      throw new Error("The selected file is not an image.");
+    }
+
+    const storageRef = ref(storage, `banners/${safeUserId}/banner.jpg`);
+    await uploadBytes(storageRef, blob, {
+      contentType: blob.type || "image/jpeg",
+      customMetadata: { ownerId: safeUserId },
+    });
+    return getDownloadURL(storageRef);
+  } catch (err) {
+    console.error("[uploadUserBanner] Banner upload failed", {
+      userId: safeUserId,
+      uriScheme: safeUri.split(":")[0] || "unknown",
+      platform: Platform.OS,
+      blobSize: blob?.size,
+      blobType: blob?.type,
+      error: err,
+    });
+    throw err;
+  } finally {
+    const close = (blob as (Blob & { close?: () => void }) | null)?.close;
+    if (typeof close === "function") close.call(blob);
+  }
 }
 
 function normalizeUserProfile(userId: string, data: Record<string, unknown>): UserProfile {
@@ -188,6 +265,7 @@ function normalizeUserProfile(userId: string, data: Record<string, unknown>): Us
     posts: typeof data.posts === "number" ? data.posts : 0,
     wins: typeof data.wins === "number" ? data.wins : 0,
     losses: typeof data.losses === "number" ? data.losses : 0,
+    bannerUrl: profileString(data.bannerUrl) || profileString(data.banner) || undefined,
     createdAt: (data.createdAt as Timestamp) ?? null,
     updatedAt: (data.updatedAt as Timestamp) ?? null,
     // ── Optional identity / status fields (alias-tolerant, never fabricated) ──

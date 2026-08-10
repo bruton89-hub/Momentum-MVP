@@ -1,5 +1,6 @@
 import React, { useCallback, useMemo, useState } from "react";
 import { View, StyleSheet, Alert, Platform, FlatList } from "react-native";
+import { showAlert, confirm } from "@/utils/alert";
 import { useLocalSearchParams, useRouter, Redirect } from "expo-router";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import Animated, {
@@ -9,7 +10,7 @@ import Animated, {
 import { useAuthStore } from "@/store/authStore";
 import { useProfile } from "@/hooks/useProfile";
 import { useUserPosts } from "@/hooks/usePosts";
-import { useBattles } from "@/hooks/useBattles";
+import { useBattles, isCountableBattle } from "@/hooks/useBattles";
 import { useFollows } from "@/hooks/useFollows";
 import { COLORS, SPACING, TRENDING_LIKES_THRESHOLD } from "@/constants/theme";
 import { isVideoMedia } from "@/utils/media";
@@ -26,13 +27,15 @@ import PostDetailModal from "@/components/PostDetailModal";
 import BattlePickerModal from "@/components/BattlePickerModal";
 import type { Battle, Post } from "@/types";
 
-type ProfileTab = "posts" | "highlights" | "battles" | "saved";
+type ProfileTab = "posts" | "highlights" | "battles";
 
+// No Saved tab here. Saves are private to the athlete who made them (enforced
+// in firestore.rules), so on someone else's profile the tab could only ever
+// render empty — a control that advertises content it can never show.
 const PROFILE_TABS: readonly ProfileTabDef<ProfileTab>[] = [
   { key: "posts", label: "Posts", icon: "grid" },
   { key: "highlights", label: "Highlights", icon: "play" },
   { key: "battles", label: "Battles", icon: "zap" },
-  { key: "saved", label: "Saved", icon: "bookmark" },
 ];
 const profileItemKey = (item: Post | Battle) => item.id;
 
@@ -77,13 +80,15 @@ export default function PlayerProfileScreen() {
 
   const isFollowing = !!targetUserId && followedIds.has(targetUserId);
 
+  // Matched contests only — see the matching note in app/(tabs)/profile.tsx.
   const profileBattles = useMemo(
     () =>
       battles.filter(
         (b) =>
-          b.playerA?.userId === targetUserId ||
-          b.playerB?.userId === targetUserId ||
-          b.creatorId === targetUserId
+          isCountableBattle(b) &&
+          (b.playerA?.userId === targetUserId ||
+            b.playerB?.userId === targetUserId ||
+            b.creatorId === targetUserId)
       ),
     [battles, targetUserId]
   );
@@ -139,7 +144,7 @@ export default function PlayerProfileScreen() {
     if (!currentUserId) return;
     const target = sortedPosts[0];
     if (!target) {
-      Alert.alert(
+      showAlert(
         "No highlights yet",
         "This athlete hasn't posted a highlight to challenge."
       );
@@ -153,12 +158,19 @@ export default function PlayerProfileScreen() {
       if (typeof window !== "undefined") window.alert("Messaging is coming soon.");
       return;
     }
-    Alert.alert("Messaging", "Messaging is coming soon.");
+    showAlert("Messaging", "Messaging is coming soon.");
   }, []);
 
+  // Back must always land somewhere. canGoBack() is false when this screen was
+  // opened by deep link or as the first route after a cold start, and in that
+  // case router.back() is a silent no-op — the button looks broken. Falling
+  // back to a replace guarantees an exit and leaves no orphan route behind.
   const goBack = useCallback(() => {
-    if (router.canGoBack()) router.back();
-    else router.navigate("/(tabs)" as never);
+    if (router.canGoBack()) {
+      router.back();
+      return;
+    }
+    router.replace("/(tabs)" as never);
   }, [router]);
 
   const isGridTab = activeTab === "posts" || activeTab === "highlights";
@@ -168,9 +180,7 @@ export default function PlayerProfileScreen() {
         ? sortedPosts
         : activeTab === "highlights"
         ? highlightPosts
-        : activeTab === "battles"
-        ? profileBattles
-        : [],
+        : profileBattles,
     [activeTab, highlightPosts, profileBattles, sortedPosts]
   );
   const listContentStyle = useMemo(
@@ -300,12 +310,6 @@ export default function PlayerProfileScreen() {
               actionLabel={`Challenge ${profile.username}`}
               onAction={handleHeaderChallenge}
             />
-          ) : activeTab === "saved" ? (
-            <EmptyState
-              icon="🔖"
-              title="No saved posts"
-              subtitle="Saved posts will show up here."
-            />
           ) : activeTab === "highlights" ? (
             <EmptyState
               icon="🎬"
@@ -347,6 +351,7 @@ export default function PlayerProfileScreen() {
         isFollowing={isFollowing}
         onFollow={handleFollow}
         onBattle={handleBattle}
+        onDeleted={() => setSelectedPost(null)}
       />
       <BattlePickerModal
         visible={!!challengeTargetPost}
@@ -384,8 +389,9 @@ const styles = StyleSheet.create({
   // ── Grid ─────────────────────────────────────────────────────────────────
   // paddingHorizontal must stay SPACING.lg — PostGridThumb's CELL math and
   // ProfileGridSkeleton both assume it.
+  // No paddingTop — the banner runs edge-to-edge under the floating compact
+  // bar. See the matching note in app/(tabs)/profile.tsx.
   grid: {
-    paddingTop: COMPACT_BAR_HEIGHT,
     paddingHorizontal: SPACING.lg,
     // paddingBottom applied inline — safe-area dependent.
     gap: SPACING.sm,
