@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -12,6 +12,7 @@ import {
   Linking,
   KeyboardAvoidingView,
   Keyboard,
+  AppState,
 } from "react-native";
 import { showAlert, showAlertWithAction, confirm } from "@/utils/alert";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -19,6 +20,7 @@ import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import { ResizeMode, Video } from "expo-av";
 import { useRouter } from "expo-router";
+import { useIsFocused } from "@react-navigation/native";
 import Animated, { FadeIn, ZoomIn, useReducedMotion } from "react-native-reanimated";
 import { useAuthStore } from "@/store/authStore";
 import {
@@ -26,7 +28,9 @@ import {
   createPost,
   MAX_POST_MEDIA_BYTES,
 } from "@/hooks/usePosts";
+import type { CreatePostInput } from "@/hooks/usePosts";
 import { createBattle } from "@/hooks/useBattles";
+import type { CreateBattleInput } from "@/hooks/useBattles";
 import {
   COLORS,
   SPACING,
@@ -42,6 +46,9 @@ import {
 import GlowButton from "@/components/GlowButton";
 import Chip from "@/components/Chip";
 import IconButton from "@/components/IconButton";
+import type { CreationMutation } from "@/utils/creationMutation";
+import { createCreationMutation } from "@/utils/creationMutation";
+import { shouldPlayCreatePreview } from "@/utils/remediationGuards";
 
 const { width: SCREEN_W } = Dimensions.get("window");
 const MEDIA_PREVIEW_H = Math.round(SCREEN_W * 0.9);
@@ -75,6 +82,7 @@ function pickerAssetType(asset: ImagePicker.ImagePickerAsset): "image" | "video"
 
 export default function CreateScreen() {
   const router = useRouter();
+  const isFocused = useIsFocused();
   const reducedMotion = useReducedMotion();
   const userId = useAuthStore((s) => s.userId);
   const profile = useAuthStore((s) => s.profile);
@@ -105,6 +113,20 @@ export default function CreateScreen() {
   // ── Video preview state — single muted player, tap to play/pause.
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewMuted, setPreviewMuted] = useState(true);
+  const [appIsActive, setAppIsActive] = useState(AppState.currentState === "active");
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (state) => {
+      const active = state === "active";
+      setAppIsActive(active);
+      if (!active) setPreviewPlaying(false);
+    });
+    return () => subscription.remove();
+  }, []);
+
+  useEffect(() => {
+    if (!isFocused) setPreviewPlaying(false);
+  }, [isFocused]);
 
   const [uploadProgress, setUploadProgress] = useState(0);
   const [isUploading, setIsUploading] = useState(false);
@@ -122,10 +144,20 @@ export default function CreateScreen() {
   // Keyed by source URI so choosing different media correctly starts over.
   const uploadedMediaRef = useRef<{ uri: string; url: string } | null>(null);
   const createdPostIdRef = useRef<string | null>(null);
+  const postAttemptRef = useRef<{
+    mutation: CreationMutation;
+    input: CreatePostInput;
+  } | null>(null);
+  const battleAttemptRef = useRef<{
+    mutation: CreationMutation;
+    input: CreateBattleInput;
+  } | null>(null);
 
   const clearPublishResumeState = useCallback(() => {
     uploadedMediaRef.current = null;
     createdPostIdRef.current = null;
+    postAttemptRef.current = null;
+    battleAttemptRef.current = null;
   }, []);
 
   const busy = isUploading || isSubmitting;
@@ -228,7 +260,13 @@ export default function CreateScreen() {
       cancelLabel: "Keep editing",
       destructive: true,
     });
-    if (discard) router.replace("/");
+    if (discard) {
+      // Expo tabs stay mounted. A confirmed discard must clear both visible
+      // draft state and the retained mutation/upload identities before leaving,
+      // otherwise the next draft can inherit the abandoned logical operation.
+      resetForm();
+      router.replace("/");
+    }
   }
 
   function handleContinue() {
@@ -282,19 +320,26 @@ export default function CreateScreen() {
       let postId = createdPostIdRef.current;
       if (!postId) {
         try {
-          postId = await createPost({
-            userId,
-            username: profile.username,
-            userAvatar: profile.avatarUrl || profile.avatar,
-            avatarUrl: profile.avatarUrl || profile.avatar,
-            mediaUrl,
-            mediaType,
-            caption: caption.trim(),
-            battleEnabled,
-            sport: sport ?? undefined,
-            position,
-            school,
-          });
+          postAttemptRef.current ??= {
+            mutation: createCreationMutation("post"),
+            input: {
+              userId,
+              username: profile.username,
+              userAvatar: profile.avatarUrl || profile.avatar,
+              avatarUrl: profile.avatarUrl || profile.avatar,
+              mediaUrl,
+              mediaType,
+              caption: caption.trim(),
+              battleEnabled,
+              sport: sport ?? undefined,
+              position,
+              school,
+            },
+          };
+          postId = await createPost(
+            postAttemptRef.current.input,
+            postAttemptRef.current.mutation
+          );
         } catch (error) {
           const detail = error instanceof Error ? error.message : "Unknown Firestore error.";
           throw new Error(`Media uploaded, but the post could not be created. ${detail}`);
@@ -305,19 +350,26 @@ export default function CreateScreen() {
       // ── 4 · Optional challenge. Separate document, separate failure mode.
       if (battleEnabled) {
         try {
-          await createBattle({
-            creatorId: userId,
-            playerA: {
-              userId,
-              username: profile.username,
-              avatar: profile.avatar,
-              mediaUrl,
-              mediaType,
-              postId,
+          battleAttemptRef.current ??= {
+            mutation: createCreationMutation("battle"),
+            input: {
+              creatorId: userId,
+              playerA: {
+                userId,
+                username: profile.username,
+                avatar: profile.avatar,
+                mediaUrl,
+                mediaType,
+                postId,
+              },
+              category,
+              durationHours,
             },
-            category,
-            durationHours,
-          });
+          };
+          await createBattle(
+            battleAttemptRef.current.input,
+            battleAttemptRef.current.mutation
+          );
         } catch (battleError) {
           // The highlight IS live. Saying "couldn't publish" here was a lie
           // that pushed athletes into re-publishing a post that already
@@ -470,7 +522,7 @@ export default function CreateScreen() {
                     source={{ uri: mediaUri }}
                     style={styles.mediaFill}
                     resizeMode={ResizeMode.COVER}
-                    shouldPlay={previewPlaying}
+                    shouldPlay={shouldPlayCreatePreview(previewPlaying, isFocused, appIsActive)}
                     isLooping
                     isMuted={previewMuted}
                     useNativeControls={false}
@@ -568,7 +620,7 @@ export default function CreateScreen() {
                 <Image source={{ uri: mediaUri }} style={styles.compactPreview} resizeMode="cover" />
               ) : (
                 <Pressable onPress={() => setPreviewPlaying((value) => !value)} accessibilityRole="button" accessibilityLabel={previewPlaying ? "Pause video preview" : "Play video preview"} style={styles.compactPreview}>
-                  <Video source={{ uri: mediaUri }} style={styles.mediaFill} resizeMode={ResizeMode.COVER} shouldPlay={previewPlaying} isLooping isMuted={previewMuted} useNativeControls={false} />
+                  <Video source={{ uri: mediaUri }} style={styles.mediaFill} resizeMode={ResizeMode.COVER} shouldPlay={shouldPlayCreatePreview(previewPlaying, isFocused, appIsActive)} isLooping isMuted={previewMuted} useNativeControls={false} />
                   <View style={styles.compactPlay}><Feather name={previewPlaying ? "pause" : "play"} size={18} color={COLORS.accent} /></View>
                 </Pressable>
               )}

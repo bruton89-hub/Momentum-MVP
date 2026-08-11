@@ -8,6 +8,7 @@ import { onAuthStateChanged } from "firebase/auth";
 import { auth } from "@/config/firebase";
 import { useAuthStore } from "@/store/authStore";
 import { fetchUserProfile } from "@/hooks/useProfile";
+import { canCommitProfile } from "@/utils/remediationGuards";
 
 void SplashScreen.preventAutoHideAsync().catch(() => undefined);
 
@@ -21,13 +22,18 @@ export default function RootLayout() {
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (user) {
+        // Never carry decorative identity from one account into another while
+        // the new profile request is in flight.
+        if (useAuthStore.getState().userId !== user.uid) setProfile(null);
         setUserId(user.uid);
         // Auth identity is enough to enter the app. Profile data is decorative
         // for Home and can hydrate without extending the native splash screen.
         setLoading(false);
         fetchUserProfile(user.uid)
           .then((profile) => {
-            if (auth.currentUser?.uid === user.uid) setProfile(profile);
+            if (canCommitProfile(user.uid, auth.currentUser?.uid ?? null)) {
+              setProfile(profile);
+            }
           })
           .catch((error) => {
             console.error("[RootLayout] profile hydration failed", error);

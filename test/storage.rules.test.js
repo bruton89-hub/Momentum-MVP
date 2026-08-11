@@ -1,6 +1,7 @@
 const { readFileSync } = require("node:fs");
 const { after, before, test } = require("node:test");
 const {
+  assertFails,
   assertSucceeds,
   initializeTestEnvironment,
 } = require("@firebase/rules-unit-testing");
@@ -22,6 +23,10 @@ after(async () => {
 
 function ownerStorage() {
   return testEnv.authenticatedContext(userId).storage();
+}
+
+function unauthenticatedStorage() {
+  return testEnv.unauthenticatedContext().storage();
 }
 
 test("Create image bytes are accepted by the posts rule", async () => {
@@ -56,6 +61,42 @@ test("avatar bytes remain accepted by the existing profile image rule", async ()
     ownerStorage().ref(`profileImages/${userId}/avatar.jpg`).put(
       new Uint8Array([1, 2, 3]),
       { contentType: "image/jpeg" }
+    )
+  );
+});
+
+test("unauthenticated uploads are rejected", async () => {
+  await assertFails(
+    unauthenticatedStorage().ref(`posts/${userId}/anonymous.jpg`).put(
+      new Uint8Array([1]),
+      { contentType: "image/jpeg" }
+    )
+  );
+});
+
+test("cross-owner uploads are rejected", async () => {
+  await assertFails(
+    ownerStorage().ref("posts/another-user/cross-owner.jpg").put(
+      new Uint8Array([1]),
+      { contentType: "image/jpeg" }
+    )
+  );
+});
+
+test("post uploads over 50 MB are rejected", async () => {
+  await assertFails(
+    ownerStorage().ref(`posts/${userId}/oversized.mp4`).put(
+      new Uint8Array(50 * 1024 * 1024 + 1),
+      { contentType: "video/mp4" }
+    )
+  );
+});
+
+test("post uploads with an invalid MIME type are rejected", async () => {
+  await assertFails(
+    ownerStorage().ref(`posts/${userId}/payload.txt`).put(
+      new Uint8Array([1, 2, 3]),
+      { contentType: "text/plain" }
     )
   );
 });

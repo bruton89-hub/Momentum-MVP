@@ -3,7 +3,7 @@ export default {
     name: "Momentum",
     slug: "momentum-app",
     scheme: "momentum",
-    version: "1.0.0",
+    version: "1.0.1",
     orientation: "portrait",
     // Top-level icon used by Expo Go and as the default for all platforms
     icon: "./assets/icon.png",
@@ -19,7 +19,7 @@ export default {
       // applied by the developer (iOS applies its own corner mask at runtime).
       icon: "./assets/icon.png",
       bundleIdentifier: "com.momentumapp.sports",
-      buildNumber: "24",
+      buildNumber: "33",
       supportsTablet: false,
       googleServicesFile: process.env.IOS_GOOGLE_SERVICES_FILE || "./GoogleService-Info.plist",
       infoPlist: {
@@ -34,7 +34,7 @@ export default {
     },
     android: {
       package: "com.momentumapp.mvp",
-      versionCode: 24,
+      versionCode: 25,
       googleServicesFile: process.env.ANDROID_GOOGLE_SERVICES_FILE || "./google-services.json",
       adaptiveIcon: {
         // Dedicated adaptive icon — foreground drawn on top of backgroundColor.

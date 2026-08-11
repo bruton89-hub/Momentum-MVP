@@ -27,6 +27,7 @@ import {
   getNextVotableBattle,
 } from "@/hooks/useBattles";
 import { uploadMedia, createPost } from "@/hooks/usePosts";
+import type { CreatePostInput } from "@/hooks/usePosts";
 import { notifyChallengeAccepted } from "@/services/notificationRepository";
 import { fetchPostsByUser } from "@/services/postRepository";
 import { COLORS, SPACING, FONTS, RADIUS } from "@/constants/theme";
@@ -48,6 +49,8 @@ import BattleResultCard from "@/components/battles/BattleResultCard";
 import { shareBattle, shareBattleResult } from "@/utils/shareBattle";
 import type { Battle, Post, BattlePlayer } from "@/types";
 import { useInteractionReady } from "@/hooks/useInteractionReady";
+import type { CreationMutation } from "@/utils/creationMutation";
+import { createCreationMutation } from "@/utils/creationMutation";
 
 // Tabs: "live" = Live Battles, "mine" = My Battles, "completed" = Completed
 type Tab = "live" | "mine" | "completed";
@@ -148,6 +151,12 @@ function AcceptModal({
   const [uploadPct, setUploadPct] = useState(0);
   const postsRequestRef = React.useRef(0);
   const operationRef = React.useRef(false);
+  const uploadAttemptRef = React.useRef<{
+    uri: string;
+    mutation: CreationMutation;
+    mediaUrl?: string;
+    input?: CreatePostInput;
+  } | null>(null);
 
   const battleId = battle?.id ?? null;
   const contentReady = useInteractionReady(visible, battleId);
@@ -209,12 +218,23 @@ function AcceptModal({
       const asset = result.assets[0];
       const mediaType: "image" | "video" = asset.type === "video" ? "video" : "image";
 
+      if (uploadAttemptRef.current?.uri !== asset.uri) {
+        uploadAttemptRef.current = {
+          uri: asset.uri,
+          mutation: createCreationMutation("post"),
+        };
+      }
+      const attempt = uploadAttemptRef.current;
+
       setUploading(true);
       setUploadPct(0);
 
-      const mediaUrl = await uploadMedia(asset.uri, userId, (pct) => setUploadPct(pct));
+      const mediaUrl =
+        attempt.mediaUrl ??
+        (await uploadMedia(asset.uri, userId, (pct) => setUploadPct(pct)));
+      attempt.mediaUrl = mediaUrl;
 
-      const newPostId = await createPost({
+      attempt.input ??= {
         userId,
         username: profile.username,
         userAvatar: profile.avatar,
@@ -223,7 +243,9 @@ function AcceptModal({
         mediaType,
         caption: "",
         battleEnabled: true,
-      });
+      };
+      const newPostId = await createPost(attempt.input, attempt.mutation);
+      uploadAttemptRef.current = null;
 
       const newPost: Post = {
         id: newPostId,

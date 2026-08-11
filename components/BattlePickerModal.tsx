@@ -29,6 +29,8 @@ import { COLORS, SPACING, RADIUS, FONTS, TYPE } from "@/constants/theme";
 import AvatarImage from "./AvatarImage";
 import MediaTile from "./MediaTile";
 import type { Post, BattlePlayer, UserProfile } from "@/types";
+import type { CreationMutation } from "@/utils/creationMutation";
+import { createCreationMutation } from "@/utils/creationMutation";
 
 // ─── Thumb size ───────────────────────────────────────────────────────────────
 const THUMB_W = 104;
@@ -111,11 +113,13 @@ export default function BattlePickerModal({
   const [selectedPostId, setSelectedPostId] = useState<string | null>(null);
   const postsRequestRef = useRef(0);
   const creatingRef = useRef(false);
+  const mutationByMatchupRef = useRef(new Map<string, CreationMutation>());
   const targetPostId = targetPost?.id ?? null;
   const contentReady = useInteractionReady(visible, targetPostId);
 
   useEffect(() => {
     setPostsLoaded(false);
+    mutationByMatchupRef.current.clear();
   }, [targetPostId]);
 
   // ── Load the current user's posts whenever the modal opens ──────────────────
@@ -163,6 +167,11 @@ export default function BattlePickerModal({
     setCreating(true);
 
     try {
+      const matchupKey = `${targetPost.id}:${myPost.id}`;
+      const mutation =
+        mutationByMatchupRef.current.get(matchupKey) ??
+        createCreationMutation("battle");
+      mutationByMatchupRef.current.set(matchupKey, mutation);
       // playerA = the post being challenged (its owner is the "defender")
       const playerA: BattlePlayer = {
         userId:    targetPost.userId,
@@ -194,7 +203,8 @@ export default function BattlePickerModal({
         playerB,
         category:      "Highlights",
         durationHours: 24,
-      });
+      }, mutation);
+      mutationByMatchupRef.current.delete(matchupKey);
 
       // Notify the challenged athlete (fire-and-forget, deduped per battle).
       notifyChallengeReceived(targetPost.userId, battleId);

@@ -6,19 +6,19 @@ import {
   orderBy,
   limit,
   getDocs,
-  addDoc,
+  setDoc,
   doc,
   getDoc,
   updateDoc,
-  serverTimestamp,
   Timestamp,
   documentId,
 } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { auth, db, functions } from "@/config/firebase";
-import { notifyBattleResults } from "@/services/notificationRepository";
 import { startDevMetricTimer } from "@/utils/performance";
 import type { Battle, BattlePlayer, BattleStatus, Vote } from "@/types";
+import type { CreationMutation } from "@/utils/creationMutation";
+import { createCreationMutation } from "@/utils/creationMutation";
 
 // ─── Server-authoritative finalization ───────────────────────────────────────
 // Closing a battle (status/winner/statsRecorded) and recording wins/losses is
@@ -350,12 +350,16 @@ export interface CreateBattleInput {
   durationHours: number;
 }
 
-export async function createBattle(input: CreateBattleInput): Promise<string> {
+export async function createBattle(
+  input: CreateBattleInput,
+  mutation: CreationMutation = createCreationMutation("battle")
+): Promise<string> {
   const endTime = Timestamp.fromMillis(
-    Date.now() + input.durationHours * 3_600_000
+    mutation.createdAtMs + input.durationHours * 3_600_000
   );
   try {
-    const docRef = await addDoc(collection(db, "battles"), {
+    const docRef = doc(db, "battles", mutation.documentId);
+    const payload = {
       creatorId: input.creatorId,
       playerA: input.playerA,
       playerB: null,
@@ -367,8 +371,16 @@ export async function createBattle(input: CreateBattleInput): Promise<string> {
       endTime,
       winner: null,
       statsRecorded: false,
-      createdAt: serverTimestamp(),
-    });
+      createdAt: Timestamp.fromMillis(mutation.createdAtMs),
+    };
+    try {
+      await setDoc(docRef, payload);
+    } catch (writeError) {
+      const existing = await getDoc(docRef).catch(() => null);
+      if (!existing?.exists() || existing.data().creatorId !== input.creatorId) {
+        throw writeError;
+      }
+    }
     invalidateBattleCache();
     return docRef.id;
   } catch (err) {
@@ -383,9 +395,8 @@ export async function createBattle(input: CreateBattleInput): Promise<string> {
 // DIFFERENT user), this writes both players and status:"live" in a SINGLE
 // document create.
 //
-// Why a single write: Firestore rules allow the creator to create a battle in
-// any status (the `allow create` rule only checks creatorId == auth.uid), but
-// they FORBID the creator from "accepting" their own open challenge
+// Why a single write: Firestore rules explicitly allow this validated live
+// shape, but they forbid the creator from "accepting" their own open challenge
 // (`isAcceptingChallenge` requires creatorId != auth.uid). The old
 // create-open-then-self-accept sequence therefore always failed at the accept
 // step with permission-denied and left an orphaned open battle behind. Creating
@@ -399,12 +410,16 @@ export interface CreateLiveBattleInput {
   durationHours: number;
 }
 
-export async function createLiveBattle(input: CreateLiveBattleInput): Promise<string> {
+export async function createLiveBattle(
+  input: CreateLiveBattleInput,
+  mutation: CreationMutation = createCreationMutation("battle")
+): Promise<string> {
   const endTime = Timestamp.fromMillis(
-    Date.now() + input.durationHours * 3_600_000
+    mutation.createdAtMs + input.durationHours * 3_600_000
   );
   try {
-    const docRef = await addDoc(collection(db, "battles"), {
+    const docRef = doc(db, "battles", mutation.documentId);
+    const payload = {
       creatorId: input.creatorId,
       playerA: input.playerA,
       playerB: input.playerB,
@@ -416,8 +431,16 @@ export async function createLiveBattle(input: CreateLiveBattleInput): Promise<st
       endTime,
       winner: null,
       statsRecorded: false,
-      createdAt: serverTimestamp(),
-    });
+      createdAt: Timestamp.fromMillis(mutation.createdAtMs),
+    };
+    try {
+      await setDoc(docRef, payload);
+    } catch (writeError) {
+      const existing = await getDoc(docRef).catch(() => null);
+      if (!existing?.exists() || existing.data().creatorId !== input.creatorId) {
+        throw writeError;
+      }
+    }
     invalidateBattleCache();
     return docRef.id;
   } catch (err) {
@@ -724,19 +747,6 @@ export function useBattles(
                 `check that the finalizeBattle Cloud Function is deployed to this project.`
             );
           }
-
-          // Battle-result notifications — written once per participant by the
-          // first client whose finalize call actually transitioned the battle
-          // ("finalized", not "already_recorded"), with deterministic ids so
-          // concurrent finalizers can't duplicate. Fire-and-forget.
-          results.forEach((result, index) => {
-            if (
-              result.status === "fulfilled" &&
-              result.value.status === "finalized"
-            ) {
-              notifyBattleResults(readyToFinalize[index], result.value.winner);
-            }
-          });
 
           const finalizedById = new Map(
             results.flatMap((result, index) =>

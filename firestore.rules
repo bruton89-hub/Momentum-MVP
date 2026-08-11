@@ -79,8 +79,48 @@ service cloud.firestore {
     match /battles/{battleId} {
       allow read: if isSignedIn();
 
+      // Battle creation is client-initiated, so every server-authoritative field
+      // must start from its neutral value. Without this shape check, any signed-
+      // in client could create an already-ended battle with forged vote totals;
+      // finalizeBattle would then trust it and record arbitrary wins/losses.
+      function hasValidNewBattleShape() {
+        return request.resource.data.keys().hasOnly([
+            'creatorId', 'playerA', 'playerB', 'votesA', 'votesB', 'status',
+            'category', 'durationHours', 'endTime', 'winner',
+            'statsRecorded', 'createdAt'
+          ])
+          && request.resource.data.creatorId == request.auth.uid
+          && request.resource.data.playerA is map
+          && request.resource.data.playerA.userId is string
+          && request.resource.data.playerA.userId.size() > 0
+          && request.resource.data.votesA == 0
+          && request.resource.data.votesB == 0
+          && request.resource.data.winner == null
+          && request.resource.data.statsRecorded == false
+          && request.resource.data.category in [
+            'Highlights', 'Drills', 'Game Clips', 'Training', 'Free Style'
+          ]
+          && request.resource.data.durationHours in [24, 48, 168]
+          && request.resource.data.endTime is timestamp
+          && request.resource.data.endTime > request.time;
+      }
+
+      function isValidOpenChallengeCreate() {
+        return request.resource.data.status == 'open'
+          && request.resource.data.playerB == null
+          && request.resource.data.playerA.userId == request.auth.uid;
+      }
+
+      function isValidLiveChallengeCreate() {
+        return request.resource.data.status == 'live'
+          && request.resource.data.playerB is map
+          && request.resource.data.playerB.userId == request.auth.uid
+          && request.resource.data.playerA.userId != request.auth.uid;
+      }
+
       allow create: if isSignedIn()
-        && request.resource.data.creatorId == request.auth.uid;
+        && hasValidNewBattleShape()
+        && (isValidOpenChallengeCreate() || isValidLiveChallengeCreate());
 
       // Accept an open challenge: only playerB + status may change, and the
       // battle must move from "open" to "live". Cannot set winner/statsRecorded.
@@ -94,8 +134,16 @@ service cloud.firestore {
           && resource.data.creatorId != request.auth.uid;
       }
 
+      // A retry after the server committed but the acknowledgement was lost
+      // replays the exact same payload at the same deterministic document ID.
+      // Permit only that byte-for-byte logical no-op; no field may change.
+      function isIdempotentCreateReplay() {
+        return resource.data.creatorId == request.auth.uid
+          && request.resource.data == resource.data;
+      }
+
       allow update: if isSignedIn()
-        && isAcceptingChallenge();
+        && (isAcceptingChallenge() || isIdempotentCreateReplay());
 
       // No client deletes; no client may set winner/statsRecorded/completed.
     }
@@ -116,15 +164,72 @@ service cloud.firestore {
     match /notifications/{notificationId} {
       allow read: if isSignedIn()
         && resource.data.recipientId == request.auth.uid;
+
+      function hasValidNotificationBase() {
+        return request.resource.data.keys().hasOnly([
+            'type', 'recipientId', 'actorId', 'subjectUsername',
+            'subjectAvatar', 'preview', 'postId', 'commentId', 'battleId', 'read',
+            'createdAt'
+          ])
+          && request.resource.data.actorId == request.auth.uid
+          && request.resource.data.recipientId is string
+          && request.resource.data.recipientId != request.auth.uid
+          && request.resource.data.subjectUsername is string
+          && request.resource.data.subjectAvatar is string
+          && request.resource.data.read == false
+          && request.resource.data.createdAt is timestamp;
+      }
+
+      function isValidFollowNotification() {
+        let followId = request.auth.uid + '_' + request.resource.data.recipientId;
+        let follow = get(/databases/$(database)/documents/follows/$(followId)).data;
+        let actor = get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+        return request.resource.data.type == 'follow'
+          && notificationId == 'follow_' + followId
+          && follow.followerId == request.auth.uid
+          && follow.followingId == request.resource.data.recipientId
+          && request.resource.data.subjectUsername == actor.username;
+      }
+
+      function isValidCommentNotification() {
+        let comment = get(/databases/$(database)/documents/comments/$(request.resource.data.commentId)).data;
+        let post = get(/databases/$(database)/documents/posts/$(request.resource.data.postId)).data;
+        return request.resource.data.type == 'comment'
+          && notificationId == 'comment_' + request.resource.data.commentId
+          && comment.userId == request.auth.uid
+          && comment.postId == request.resource.data.postId
+          && post.userId == request.resource.data.recipientId
+          && request.resource.data.subjectUsername == comment.username;
+      }
+
+      function isValidChallengeReceivedNotification() {
+        let battle = get(/databases/$(database)/documents/battles/$(request.resource.data.battleId)).data;
+        return request.resource.data.type == 'challenge_received'
+          && notificationId == 'challenge_' + request.resource.data.battleId
+          && battle.status == 'live'
+          && battle.creatorId == request.auth.uid
+          && battle.playerB.userId == request.auth.uid
+          && battle.playerA.userId == request.resource.data.recipientId
+          && request.resource.data.subjectUsername == battle.playerB.username;
+      }
+
+      function isValidChallengeAcceptedNotification() {
+        let battle = get(/databases/$(database)/documents/battles/$(request.resource.data.battleId)).data;
+        return request.resource.data.type == 'challenge_accepted'
+          && notificationId == 'accepted_' + request.resource.data.battleId
+          && battle.status == 'live'
+          && battle.playerB.userId == request.auth.uid
+          && battle.playerA.userId == request.resource.data.recipientId
+          && battle.creatorId == request.resource.data.recipientId
+          && request.resource.data.subjectUsername == battle.playerB.username;
+      }
+
       allow create: if isSignedIn()
-        && request.resource.data.actorId == request.auth.uid
-        && request.resource.data.recipientId is string
-        && request.resource.data.recipientId != request.auth.uid
-        && request.resource.data.read == false
-        && request.resource.data.type in [
-          'follow', 'comment', 'challenge_received', 'challenge_accepted',
-          'battle_completed', 'battle_won'
-        ];
+        && hasValidNotificationBase()
+        && (isValidFollowNotification()
+          || isValidCommentNotification()
+          || isValidChallengeReceivedNotification()
+          || isValidChallengeAcceptedNotification());
       // Recipient may mark read (one-way).
       allow update: if isSignedIn()
         && resource.data.recipientId == request.auth.uid

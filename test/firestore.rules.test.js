@@ -105,6 +105,31 @@ const openBattle = {
   statsRecorded: false,
 };
 
+function newBattle(overrides = {}) {
+  return {
+    creatorId: "user-a",
+    playerA: {
+      userId: "user-a",
+      username: "athlete-a",
+      avatar: "",
+      mediaUrl: "https://example.test/a.jpg",
+      mediaType: "image",
+      postId: "post-a",
+    },
+    playerB: null,
+    status: "open",
+    votesA: 0,
+    votesB: 0,
+    category: "Highlights",
+    durationHours: 24,
+    endTime: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    winner: null,
+    statsRecorded: false,
+    createdAt: new Date(),
+    ...overrides,
+  };
+}
+
 const unreadNotification = {
   type: "follow",
   recipientId: "user-a",
@@ -113,6 +138,19 @@ const unreadNotification = {
   subjectAvatar: "",
   read: false,
 };
+
+function notification(overrides = {}) {
+  return {
+    type: "follow",
+    recipientId: "user-a",
+    actorId: "user-b",
+    subjectUsername: "athlete-b",
+    subjectAvatar: "",
+    read: false,
+    createdAt: new Date(),
+    ...overrides,
+  };
+}
 
 test("current rules allow recipients to list and count only their notifications", async () => {
   await seed(current, [
@@ -163,6 +201,81 @@ test("current rules deny unscoped notification list/count queries", async () => 
 
   await assertFails(getDocs(unscopedUnread));
   await assertFails(getCountFromServer(unscopedUnread));
+});
+
+test("legitimate backed client notification creation succeeds for social and challenge types", async () => {
+  const directBattle = newBattle({
+    creatorId: "user-b",
+    status: "live",
+    playerA: { userId: "user-a", username: "athlete-a" },
+    playerB: { userId: "user-b", username: "athlete-b" },
+  });
+  const acceptedBattle = newBattle({
+    creatorId: "user-a",
+    status: "live",
+    playerA: { userId: "user-a", username: "athlete-a" },
+    playerB: { userId: "user-b", username: "athlete-b" },
+  });
+  await seed(current, [
+    ["users/user-a", { ...profile, username: "athlete-a" }],
+    ["users/user-b", { ...profile, username: "athlete-b" }],
+    ["follows/user-b_user-a", { followerId: "user-b", followingId: "user-a" }],
+    ["posts/post-a", post],
+    ["comments/comment-a", { postId: "post-a", userId: "user-b", username: "athlete-b", text: "Nice" }],
+    ["battles/direct", directBattle],
+    ["battles/accepted", acceptedBattle],
+  ]);
+
+  const actorB = authenticatedDb(current, "user-b");
+  await assertSucceeds(setDoc(doc(actorB, "notifications/follow_user-b_user-a"), notification()));
+  await assertSucceeds(setDoc(doc(actorB, "notifications/comment_comment-a"), notification({
+    type: "comment", postId: "post-a", commentId: "comment-a", preview: "Nice",
+  })));
+  await assertSucceeds(setDoc(doc(actorB, "notifications/challenge_direct"), notification({
+    type: "challenge_received", battleId: "direct",
+  })));
+  await assertSucceeds(setDoc(doc(actorB, "notifications/accepted_accepted"), notification({
+    type: "challenge_accepted", battleId: "accepted",
+  })));
+});
+
+test("notification rules reject forged actors, references, and recipients", async () => {
+  await seed(current, [
+    ["users/user-b", { ...profile, username: "athlete-b" }],
+    ["follows/user-b_user-a", { followerId: "user-b", followingId: "user-a" }],
+  ]);
+  const actorB = authenticatedDb(current, "user-b");
+  await assertFails(setDoc(doc(actorB, "notifications/follow_user-b_user-a"), notification({ actorId: "user-c" })));
+  await assertFails(setDoc(doc(actorB, "notifications/comment_missing"), notification({
+    type: "comment", postId: "missing", commentId: "missing",
+  })));
+  await assertFails(setDoc(doc(actorB, "notifications/follow_user-b_user-c"), notification({ recipientId: "user-c" })));
+});
+
+test("notification rules reject forged battle_won and challenge_received events", async () => {
+  const completedBattle = newBattle({
+    creatorId: "user-a",
+    status: "completed",
+    playerA: { userId: "user-a", username: "athlete-a" },
+    playerB: { userId: "user-b", username: "athlete-b" },
+    winner: "user-a",
+    statsRecorded: true,
+    endTime: new Date(Date.now() - 60_000),
+  });
+  await seed(current, [["battles/completed-forge", completedBattle]]);
+  const actorC = authenticatedDb(current, "user-c");
+  await assertFails(setDoc(doc(actorC, "notifications/bres_completed-forge_user-a"), notification({
+    type: "battle_won", actorId: "user-c", recipientId: "user-a",
+    subjectUsername: "athlete-b", battleId: "completed-forge",
+  })));
+  await assertFails(setDoc(doc(actorC, "notifications/bres_completed-forge_user-b"), notification({
+    type: "battle_won", actorId: "user-c", recipientId: "user-b",
+    subjectUsername: "athlete-a", battleId: "completed-forge",
+  })));
+  await assertFails(setDoc(doc(actorC, "notifications/challenge_missing"), notification({
+    type: "challenge_received", actorId: "user-c", recipientId: "user-a",
+    subjectUsername: "athlete-c", battleId: "missing",
+  })));
 });
 
 test("current rules require authentication for reads", async () => {
@@ -290,6 +403,95 @@ test("current rules allow open challenge acceptance", async () => {
       status: "live",
     })
   );
+});
+
+test("current rules allow only the two legitimate battle creation shapes", async () => {
+  const db = authenticatedDb(current, "user-a");
+  await assertSucceeds(
+    setDoc(doc(db, "battles/new-open"), newBattle())
+  );
+  await assertSucceeds(
+    setDoc(
+      doc(db, "battles/new-live"),
+      newBattle({
+        status: "live",
+        playerA: {
+          userId: "user-b",
+          username: "athlete-b",
+          avatar: "",
+          mediaUrl: "https://example.test/b.jpg",
+          mediaType: "image",
+          postId: "post-b",
+        },
+        playerB: {
+          userId: "user-a",
+          username: "athlete-a",
+          avatar: "",
+          mediaUrl: "https://example.test/a.jpg",
+          mediaType: "image",
+          postId: "post-a",
+        },
+      })
+    )
+  );
+});
+
+test("current rules reject forged battle results and vote totals at creation", async () => {
+  const db = authenticatedDb(current, "user-a");
+  await assertFails(
+    setDoc(
+      doc(db, "battles/forged-result"),
+      newBattle({
+        status: "completed",
+        votesA: 500,
+        winner: "user-a",
+        statsRecorded: true,
+        endTime: new Date(Date.now() - 60_000),
+      })
+    )
+  );
+  await assertFails(
+    setDoc(
+      doc(db, "battles/forged-live-votes"),
+      newBattle({
+        status: "live",
+        votesB: 1,
+        playerA: { userId: "user-b" },
+        playerB: { userId: "user-a" },
+      })
+    )
+  );
+});
+
+test("deterministic post and battle IDs make acknowledgement-loss retries idempotent", async () => {
+  const db = authenticatedDb(current, "user-a");
+  const stablePost = {
+    ...post,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+  const stableBattle = newBattle();
+
+  // First writes commit. Replaying the same logical mutations at the same IDs
+  // models clients that never received those acknowledgements.
+  await assertSucceeds(setDoc(doc(db, "posts/post-mutation-1"), stablePost));
+  await assertSucceeds(setDoc(doc(db, "posts/post-mutation-1"), stablePost));
+  await assertSucceeds(setDoc(doc(db, "battles/battle-mutation-1"), stableBattle));
+  await assertSucceeds(setDoc(doc(db, "battles/battle-mutation-1"), stableBattle));
+
+  const posts = await assertSucceeds(getDocs(collection(db, "posts")));
+  const battles = await assertSucceeds(getDocs(collection(db, "battles")));
+  if (posts.size !== 1) throw new Error(`expected one post, got ${posts.size}`);
+  if (battles.size !== 1) throw new Error(`expected one battle, got ${battles.size}`);
+
+  // A genuinely new mutation uses another preallocated ID and creates a second
+  // logical record rather than overwriting the first.
+  await assertSucceeds(setDoc(doc(db, "posts/post-mutation-2"), stablePost));
+  await assertSucceeds(setDoc(doc(db, "battles/battle-mutation-2"), stableBattle));
+  const postsAfterNew = await assertSucceeds(getDocs(collection(db, "posts")));
+  const battlesAfterNew = await assertSucceeds(getDocs(collection(db, "battles")));
+  if (postsAfterNew.size !== 2) throw new Error(`expected two posts, got ${postsAfterNew.size}`);
+  if (battlesAfterNew.size !== 2) throw new Error(`expected two battles, got ${battlesAfterNew.size}`);
 });
 
 test("hardened fixture preserves transitional challenge acceptance", async () => {

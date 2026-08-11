@@ -1,6 +1,7 @@
 import {
   collection,
   doc,
+  getDoc,
   getDocs,
   getCountFromServer,
   limit,
@@ -15,7 +16,6 @@ import { auth, db } from "@/config/firebase";
 import { useAuthStore } from "@/store/authStore";
 import { timestampToMs } from "@/services/postRepository";
 import type {
-  Battle,
   MomentumNotification,
   NotificationType,
 } from "@/types";
@@ -72,6 +72,7 @@ interface WriteInput {
   subjectAvatar: string;
   preview?: string;
   postId?: string;
+  commentId?: string;
   battleId?: string;
 }
 
@@ -90,14 +91,31 @@ async function writeNotification(input: WriteInput): Promise<void> {
   // Never notify yourself; rules also forbid it.
   if (!actor || actor.userId === input.recipientId) return;
   try {
+    // Follow can be tapped during the short window after auth resolves but
+    // before the decorative profile store hydrates. Its rule verifies the
+    // authoritative username, so resolve that identity rather than dropping a
+    // legitimate notification because the client temporarily had "".
+    let subjectUsername = input.subjectUsername;
+    let subjectAvatar = input.subjectAvatar;
+    if (input.type === "follow") {
+      const actorProfile = await getDoc(doc(db, "users", actor.userId));
+      if (!actorProfile.exists()) return;
+      const data = actorProfile.data();
+      subjectUsername = typeof data.username === "string" ? data.username : "";
+      subjectAvatar =
+        (typeof data.avatarUrl === "string" && data.avatarUrl) ||
+        (typeof data.avatar === "string" && data.avatar) ||
+        "";
+    }
     await setDoc(doc(db, "notifications", input.id), {
       type: input.type,
       recipientId: input.recipientId,
       actorId: actor.userId,
-      subjectUsername: input.subjectUsername,
-      subjectAvatar: input.subjectAvatar,
+      subjectUsername,
+      subjectAvatar,
       ...(input.preview ? { preview: input.preview } : {}),
       ...(input.postId ? { postId: input.postId } : {}),
+      ...(input.commentId ? { commentId: input.commentId } : {}),
       ...(input.battleId ? { battleId: input.battleId } : {}),
       read: false,
       createdAt: Timestamp.now(),
@@ -137,6 +155,7 @@ export function notifyComment(
     subjectAvatar: actor.avatar,
     preview: text.slice(0, 80),
     postId,
+    commentId,
   });
 }
 
@@ -169,34 +188,6 @@ export function notifyChallengeAccepted(
     subjectUsername: actor.username,
     subjectAvatar: actor.avatar,
     battleId,
-  });
-}
-
-/**
- * Battle-result notifications, written by whichever client successfully
- * finalized the battle (actor is incidental; the row displays the recipient's
- * OPPONENT). One doc per participant, keyed on battleId + recipient — the
- * first finalizer wins, later attempts hit the dedupe path. The finalizing
- * viewer, if they are a participant, is skipped (rules forbid self-notify);
- * they are looking at the result already.
- */
-export function notifyBattleResults(battle: Battle, winnerId: string | null): void {
-  const players = [battle.playerA, battle.playerB].filter(
-    (p): p is NonNullable<typeof p> => !!p?.userId
-  );
-  if (players.length < 2) return;
-  players.forEach((player) => {
-    const opponent = players.find((p) => p.userId !== player.userId);
-    if (!opponent) return;
-    const won = !!winnerId && winnerId === player.userId;
-    void writeNotification({
-      id: `bres_${battle.id}_${player.userId}`,
-      type: won ? "battle_won" : "battle_completed",
-      recipientId: player.userId,
-      subjectUsername: opponent.username,
-      subjectAvatar: opponent.avatar,
-      battleId: battle.id,
-    });
   });
 }
 

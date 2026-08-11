@@ -34,6 +34,8 @@ import DiscoveryTabs, { DiscoveryTabDef } from "@/components/DiscoveryTabs";
 import { isVideoMedia } from "@/utils/media";
 import type { Post } from "@/types";
 import { isPostDeleted } from "@/services/postDeletion";
+import type { CreationMutation } from "@/utils/creationMutation";
+import { createCreationMutation } from "@/utils/creationMutation";
 
 // ─── Discovery tabs ─────────────────────────────────────────────────────────────
 // "forYou" / "following" keep their original feeds. "battles" filters the
@@ -343,6 +345,7 @@ export default function HomeScreen() {
   // can show a loading state while the Firestore write is in-flight.
   const [startingBattlePostId, setStartingBattlePostId] = useState<string | null>(null);
   const startingBattleRef = useRef<string | null>(null);
+  const battleMutationByPostRef = useRef(new Map<string, CreationMutation>());
 
   // `challengeTargetPost` is set when the user taps "Challenge" on someone
   // else's post — it drives the BattlePickerModal.
@@ -361,6 +364,10 @@ export default function HomeScreen() {
         startingBattleRef.current = post.id;
         setStartingBattlePostId(post.id);
         try {
+          const mutation =
+            battleMutationByPostRef.current.get(post.id) ??
+            createCreationMutation("battle");
+          battleMutationByPostRef.current.set(post.id, mutation);
           await createBattle({
             creatorId:     userId,
             playerA: {
@@ -373,7 +380,8 @@ export default function HomeScreen() {
             },
             category:      "Highlights",
             durationHours: 24,
-          });
+          }, mutation);
+          battleMutationByPostRef.current.delete(post.id);
           showAlert("Challenge open", "Your post is now open for challenges.");
         } catch (err) {
           console.error("Start battle failed", err);

@@ -65,6 +65,9 @@ import BattleHistoryCard from "@/components/BattleHistoryCard";
 import PostDetailModal from "@/components/PostDetailModal";
 import Chip from "@/components/Chip";
 import type { Battle, Post, UserProfile } from "@/types";
+import type { CreationMutation } from "@/utils/creationMutation";
+import { createCreationMutation } from "@/utils/creationMutation";
+import { canCommitProfile } from "@/utils/remediationGuards";
 
 type ProfileTab = "posts" | "highlights" | "battles" | "saved";
 
@@ -689,6 +692,7 @@ export default function ProfileScreen() {
   const [selectedPost, setSelectedPost] = useState<Post | null>(null);
   const [startingBattlePostId, setStartingBattlePostId] = useState<string | null>(null);
   const startingBattleRef = React.useRef<string | null>(null);
+  const battleMutationByPostRef = React.useRef(new Map<string, CreationMutation>());
   const listRef = React.useRef<FlatList<Post | Battle>>(null);
 
   // Collapsing header — scroll offset lives on the UI thread only.
@@ -727,15 +731,19 @@ export default function ProfileScreen() {
       void refreshSaved();
       if (userId) {
         void fetchUserProfile(userId).then((freshProfile) => {
-          if (freshProfile) setProfile(freshProfile);
+          if (freshProfile && canCommitProfile(userId, auth.currentUser?.uid ?? null)) {
+            setProfile(freshProfile);
+          }
         });
       }
     }, [refreshPosts, refreshSaved, setProfile, userId])
   );
 
   function handleSaved(updatedProfile: UserProfile) {
-    setProfile(updatedProfile);
-    refreshPosts();
+    if (userId && canCommitProfile(userId, auth.currentUser?.uid ?? null)) {
+      setProfile(updatedProfile);
+      refreshPosts();
+    }
   }
 
   async function doSignOut() {
@@ -770,6 +778,10 @@ export default function ProfileScreen() {
     startingBattleRef.current = post.id;
     setStartingBattlePostId(post.id);
     try {
+      const mutation =
+        battleMutationByPostRef.current.get(post.id) ??
+        createCreationMutation("battle");
+      battleMutationByPostRef.current.set(post.id, mutation);
       await createBattle({
         creatorId: userId,
         playerA: {
@@ -782,7 +794,8 @@ export default function ProfileScreen() {
         },
         category: "Highlights",
         durationHours: 24,
-      });
+      }, mutation);
+      battleMutationByPostRef.current.delete(post.id);
       showAlert("Challenge open", "Your post is now open for challenges.");
       setSelectedPost(null);
     } catch (err) {

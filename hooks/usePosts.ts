@@ -5,8 +5,10 @@ import {
   orderBy,
   limit,
   getDocs,
+  getDoc,
   startAfter,
-  addDoc,
+  doc,
+  setDoc,
   where,
   Timestamp,
   documentId,
@@ -36,6 +38,9 @@ import {
   excludeDeletedPosts,
   subscribeToPostDeletions,
 } from "@/services/postDeletion";
+import type { CreationMutation } from "@/utils/creationMutation";
+import { createCreationMutation } from "@/utils/creationMutation";
+import { isLatestGeneration } from "@/utils/remediationGuards";
 
 const POSTS_PER_PAGE = 20;
 const DISCOVERY_INITIAL_LIMIT = 24;
@@ -260,7 +265,10 @@ export interface CreatePostInput {
   teamName?: string;
 }
 
-export async function createPost(input: CreatePostInput): Promise<string> {
+export async function createPost(
+  input: CreatePostInput,
+  mutation: CreationMutation = createCreationMutation("post")
+): Promise<string> {
   const {
     originalMediaUrl,
     videoEdit,
@@ -293,10 +301,21 @@ export async function createPost(input: CreatePostInput): Promise<string> {
     // serverTimestamp() resolves to null until the server acknowledges the write,
     // causing orderBy("createdAt","desc") to sort the new post to the bottom
     // and the feed's limit(POSTS_PER_PAGE) to exclude it.
-    createdAt: Timestamp.now(),
-    updatedAt: Timestamp.now(),
+    createdAt: Timestamp.fromMillis(mutation.createdAtMs),
+    updatedAt: Timestamp.fromMillis(mutation.createdAtMs),
   };
-  const docRef = await addDoc(collection(db, "posts"), payload);
+  const docRef = doc(db, "posts", mutation.documentId);
+  try {
+    await setDoc(docRef, payload);
+  } catch (writeError) {
+    // The first write may have committed and then progressed (for example, an
+    // owner edit) before this replay. Resolve the preallocated identity as
+    // success only when the existing document still belongs to this creator.
+    const existing = await getDoc(docRef).catch(() => null);
+    if (!existing?.exists() || existing.data().userId !== input.userId) {
+      throw writeError;
+    }
+  }
   // The pool just changed — the next Home focus must re-fetch rather than serve
   // a cached page that is missing the highlight this athlete just published.
   // Discover derives all of its rails from its own cached pool, so that has to
@@ -716,7 +735,8 @@ export function useFollowingPosts(
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const fetchInFlightRef = useRef(false);
+  const requestIdRef = useRef(0);
+  const inFlightKeysRef = useRef(new Set<string>());
   const { isStale, markFresh } = useFeedFreshness();
 
   useEffect(
@@ -738,11 +758,15 @@ export function useFollowingPosts(
         return;
       }
 
-      if (fetchInFlightRef.current) {
+      const queryKey = `${currentUserId ?? "signed-out"}:${followedKey}`;
+      // Deduplicate identical refreshes, but never let an older follow set block
+      // the new generation from starting its own request.
+      if (inFlightKeysRef.current.has(queryKey)) {
         return;
       }
 
-      fetchInFlightRef.current = true;
+      const requestId = ++requestIdRef.current;
+      inFlightKeysRef.current.add(queryKey);
 
       if (isRefresh) setRefreshing(true);
       else setLoading(true);
@@ -750,7 +774,7 @@ export function useFollowingPosts(
       try {
         // No one followed → return empty immediately
         if (followedIds.size === 0) {
-          setPosts([]);
+          if (isLatestGeneration(requestId, requestIdRef.current)) setPosts([]);
           return;
         }
 
@@ -761,26 +785,33 @@ export function useFollowingPosts(
 
         // Replace results. Do not append: focus refreshes and followed-id changes
         // should never stack duplicate batches into existing feed state.
-        setPosts(excludeDeletedPosts(unique));
-        markFresh();
+        if (isLatestGeneration(requestId, requestIdRef.current)) {
+          setPosts(excludeDeletedPosts(unique));
+          markFresh();
+        }
       } catch (err) {
         // Surface the real error code so a FAILED_PRECONDITION (missing index)
         // or PERMISSION_DENIED isn't silently swallowed as an empty feed.
         const code = (err as { code?: string })?.code ?? "unknown";
         console.error("[followingFeed] query failed — code:", code, err);
-        setPosts([]);
+        if (isLatestGeneration(requestId, requestIdRef.current)) setPosts([]);
       } finally {
-        fetchInFlightRef.current = false;
-        setLoading(false);
-        setRefreshing(false);
+        inFlightKeysRef.current.delete(queryKey);
+        if (isLatestGeneration(requestId, requestIdRef.current)) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [followedKey, followsLoading]
+    [currentUserId, followedKey, followsLoading, markFresh]
   );
 
   useEffect(() => {
-    fetchPosts();
+    void fetchPosts();
+    return () => {
+      requestIdRef.current += 1;
+    };
   }, [fetchPosts]);
 
   // Stable refresh reference — wrapped so its identity only changes when

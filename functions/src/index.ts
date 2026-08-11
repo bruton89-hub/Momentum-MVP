@@ -51,6 +51,8 @@ const DELETE_BATCH_SIZE = 400;
 
 interface BattlePlayer {
   userId?: string;
+  username?: string;
+  avatar?: string;
 }
 
 // ─── Time helpers (mirror the client's getBattleEndTime logic) ────────────────
@@ -145,11 +147,53 @@ export const finalizeBattle = onCall(
         );
       }
 
-      // Determine the winner from the authoritative vote counts.
+      // Validate immutable participant provenance before trusting this document.
+      // This protects finalization from malformed battles that may have been
+      // written before the hardened creation rules were deployed.
       const playerA = (data.playerA as BattlePlayer | null) ?? null;
       const playerB = (data.playerB as BattlePlayer | null) ?? null;
+      const creatorId = typeof data.creatorId === "string" ? data.creatorId : "";
+      const creatorIsParticipant =
+        !!creatorId &&
+        (creatorId === playerA?.userId || creatorId === playerB?.userId);
+      if (
+        !playerA?.userId ||
+        !creatorIsParticipant ||
+        (!!playerB?.userId && playerA.userId === playerB.userId)
+      ) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Battle participant provenance is invalid."
+        );
+      }
+
+      // Stored counters are not accepted on faith. Every legitimate vote has a
+      // server-created marker, so the markers must exactly reproduce both
+      // counters before stats or result notifications can be written.
       const votesA = typeof data.votesA === "number" ? data.votesA : 0;
       const votesB = typeof data.votesB === "number" ? data.votesB : 0;
+      const voteSnapshot = await tx.get(
+        db.collection("votes").where("battleId", "==", battleId)
+      );
+      let recordedVotesA = 0;
+      let recordedVotesB = 0;
+      let malformedVote = false;
+      voteSnapshot.forEach((vote) => {
+        const side = vote.get("side");
+        if (side === "A") recordedVotesA += 1;
+        else if (side === "B") recordedVotesB += 1;
+        else malformedVote = true;
+      });
+      if (
+        malformedVote ||
+        votesA !== recordedVotesA ||
+        votesB !== recordedVotesB
+      ) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Battle vote counters do not match authoritative vote records."
+        );
+      }
 
       // ── Unmatched challenge: nobody ever accepted ──────────────────────────
       // This is NOT a completed battle. Marking it completed put "Waiting for
@@ -209,6 +253,31 @@ export const finalizeBattle = onCall(
           { losses: FieldValue.increment(1) },
           { merge: true }
         );
+      }
+
+
+      // Result notifications are part of the same Admin transaction as the
+      // authoritative outcome. Clients cannot forge these writes, and a
+      // transaction retry cannot duplicate them because IDs are deterministic.
+      const players = [playerA, playerB].filter(
+        (player): player is BattlePlayer & { userId: string } => !!player?.userId
+      );
+      if (players.length === 2) {
+        players.forEach((player) => {
+          const opponent = players.find((candidate) => candidate.userId !== player.userId);
+          if (!opponent) return;
+          const won = !!winnerId && winnerId === player.userId;
+          tx.set(db.collection("notifications").doc(`bres_${battleId}_${player.userId}`), {
+            type: won ? "battle_won" : "battle_completed",
+            recipientId: player.userId,
+            actorId: "system",
+            subjectUsername: opponent.username ?? "An athlete",
+            subjectAvatar: opponent.avatar ?? "",
+            battleId,
+            read: false,
+            createdAt: FieldValue.serverTimestamp(),
+          });
+        });
       }
 
       return {
