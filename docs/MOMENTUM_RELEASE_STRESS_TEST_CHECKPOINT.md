@@ -3,19 +3,19 @@
 ## Release identity
 
 - Version: 1.0.1
-- iOS build: 33
-- Android version code: 25
-- Release commit: `35438f826858241f2c51acfe80d0af91dcdedb06`
-- EAS build ID: `f8a55b3e-9548-4c12-ac63-3a4b39d4f6bc`
+- iOS build: 34
+- Android version code: 26
+- Release commit: `b45124543837cfdb5cdd360f8b46ab2b2f4b68e6`
+- EAS build ID: `99c83062-bfae-4f06-b98a-4bf194d08569`
 - EAS build: production iOS, finished successfully
-- EAS artifact: https://expo.dev/artifacts/eas/bgeHjbpwna-UVkNLdHhxsMTznhMZblZ21HUGhfEO8nU.ipa
+- EAS artifact: https://expo.dev/artifacts/eas/KW6hCxIV4qlhJ5eEhMXXpy-qJJdgDi2PfaPj13XwKLs.ipa
 
 ## Stress-test progression
 
 - Phase 1: RED
 - Phase 2: GREEN
 - Phase 3: GREEN
-- Physical-device verification: passed based on user testing of the changed build, which the user reported was running smoothly
+- Physical-device verification: passed based on user testing, including the athlete-profile back control and legacy post deletion
 
 ## Major defects discovered and remediated
 
@@ -28,6 +28,8 @@
 - Phase 3 Create discard retention issue
 - Follow-notification hydration issue
 - Missing authoritative battle vote reconciliation
+- Legacy post ownership compatibility in deletion rules and the deletion callable
+- Athlete-profile back control positioning and touch reliability on iPhone safe areas
 
 ## Security architecture changes
 
@@ -40,22 +42,22 @@
 
 ## Validation
 
-Final release validation completed with **75/75 automated tests passing and 0 failures**:
+Final release validation completed with **78/78 automated tests passing and 0 failures**:
 
 - Battle behavior: 9/9
 - Media upload: 4/4
-- Mutation and remediation guards: 6/6
-- Firestore rules: 33/33
+- Mutation and remediation guards: 7/7
+- Firestore rules: 34/34
 - Storage rules: 8/8
 - Functions contracts: 7/7
 - Battle-finalization integration: 3/3
-- Post-deletion integration: 5/5
+- Post-deletion integration: 6/6
 
 Additional successful gates:
 
 - App TypeScript
 - Functions TypeScript
-- Expo dependency compatibility check
+- Expo dependency compatibility check: 16/16
 - Web production export
 - iOS production export
 - Android production export
@@ -67,13 +69,13 @@ Additional successful gates:
 - Firestore rules: deployed successfully first
 - Cloud Functions: deployed successfully immediately afterward
 - Functions deployed: `finalizeBattle`, `castBattleVote`, `setPostLike`, and `deletePost`
-- Post-deployment Function hash: `8a5b42f4c83badb3903fb4c437837aa3fe947922`
+- Post-deployment Function hash: `3c392376e15d06d7c11a1d8eaeba0cfca5b46304`
 - Post-deployment verification: all four Functions reported `ACTIVE` in `us-central1`; `finalizeBattle` was present and healthy by deployment/inventory status
-- Backend conclusion: ready for client version 1.0.1
+- Backend conclusion: ready for client version 1.0.1 build 34
 
 ## Device verification
 
-The changed build was physically exercised by the user and reported as running smoothly. This checkpoint records that user report and does not assert that any additional device scenarios were independently executed during the final release task.
+The changed build was physically exercised by the user. The user reported that the athlete-profile back button works reliably and that deletion succeeds for a legitimate legacy-owned post. This checkpoint records those user results and does not assert that any additional device scenarios were independently executed during the final release task.
 
 ## Remaining non-blocking risks
 
@@ -82,7 +84,6 @@ The changed build was physically exercised by the user and reported as running s
 - Force-quitting between a Storage upload and its Firestore write can leave an orphaned Storage object.
 - Follow and individually deleted comment notifications can remain as historical records.
 - Historical production data was not fully audited.
-- Expo dependency validation ran offline and warns that offline compatibility validation is less authoritative.
 
 ## Release conclusion
 
