@@ -38,3 +38,16 @@ test("confirmed Create discard clears retained workflow state before navigation"
     /if \(discard\) \{[\s\S]*?resetForm\(\);[\s\S]*?router\.replace\("\/"\);[\s\S]*?\}/
   );
 });
+
+test("athlete profile back navigation is safe-area positioned with a reliable target", () => {
+  const profileSource = readFileSync("app/profile/[userId].tsx", "utf8");
+  const compactBarSource = readFileSync("components/ProfileCompactBar.tsx", "utf8");
+
+  assert.match(
+    profileSource,
+    /if \(router\.canGoBack\(\)\) \{[\s\S]*?router\.back\(\);[\s\S]*?router\.replace\("\/\(tabs\)" as never\);/
+  );
+  assert.match(compactBarSource, /top: insets\.top/);
+  assert.match(compactBarSource, /minWidth: 44/);
+  assert.match(compactBarSource, /minHeight: 44/);
+});

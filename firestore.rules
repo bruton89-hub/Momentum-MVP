@@ -9,6 +9,21 @@ service cloud.firestore {
     function isOwner(uid) {
       return isSignedIn() && request.auth.uid == uid;
     }
+    // Modern posts use userId. Older production posts may use one of these
+    // aliases, so deletion follows the same strict precedence as client reads
+    // and the server callable. A conflicting lower-priority alias can never
+    // override an existing canonical owner.
+    function postOwnerId(data) {
+      let userId = data.get('userId', '');
+      let authorId = data.get('authorId', '');
+      let uid = data.get('uid', '');
+      let ownerId = data.get('ownerId', '');
+      return userId is string && userId.size() > 0 ? userId
+        : authorId is string && authorId.size() > 0 ? authorId
+        : uid is string && uid.size() > 0 ? uid
+        : ownerId is string && ownerId.size() > 0 ? ownerId
+        : '';
+    }
     // Keys that change between the existing doc and the incoming write.
     function changedKeys() {
       return request.resource.data.diff(resource.data).affectedKeys();
@@ -39,7 +54,7 @@ service cloud.firestore {
         && changedKeys().hasOnly(['caption', 'battleEnabled', 'updatedAt'])
         && request.resource.data.userId == resource.data.userId
         && request.resource.data.likesCount == resource.data.likesCount;
-      allow delete: if isOwner(resource.data.userId);
+      allow delete: if isOwner(postOwnerId(resource.data));
     }
 
     // ─── Likes ─────────────────────────────────────────────────────────────────

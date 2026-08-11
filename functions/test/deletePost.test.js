@@ -67,6 +67,40 @@ test("deletePost rejects another user and an unauthenticated request", async () 
   assert.equal(await exists(`posts/${postId}`), true);
 });
 
+test("deletePost supports legacy owner aliases without allowing conflicts or non-owners", async () => {
+  const legacyShapes = [
+    ["authorId", "delete-post-legacy-author"],
+    ["uid", "delete-post-legacy-uid"],
+    ["ownerId", "delete-post-legacy-owner"],
+  ];
+
+  for (const [ownerField, postId] of legacyShapes) {
+    await db.doc(`posts/${postId}`).set({
+      [ownerField]: "legacy-owner",
+      mediaUrl: "https://example.test/legacy.jpg",
+    });
+    await assert.rejects(
+      deletePost.run(request("other-user", postId)),
+      (error) => error.code === "permission-denied"
+    );
+    const result = await deletePost.run(request("legacy-owner", postId));
+    assert.equal(result.outcome, "applied");
+    assert.equal(await exists(`posts/${postId}`), false);
+  }
+
+  const conflictingPostId = "delete-post-conflicting-owner";
+  await db.doc(`posts/${conflictingPostId}`).set({
+    userId: "canonical-owner",
+    authorId: "other-user",
+    mediaUrl: "https://example.test/conflict.jpg",
+  });
+  await assert.rejects(
+    deletePost.run(request("other-user", conflictingPostId)),
+    (error) => error.code === "permission-denied"
+  );
+  assert.equal(await exists(`posts/${conflictingPostId}`), true);
+});
+
 test("deletePost blocks active battles without removing the post", async () => {
   const postId = "delete-post-active-battle";
   await Promise.all([

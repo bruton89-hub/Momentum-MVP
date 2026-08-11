@@ -91,7 +91,14 @@ export default function ProfileCompactBar({
 
   return (
     <View
-      style={[styles.bar, { paddingLeft: padLeft, paddingRight: padRight }]}
+      style={[
+        styles.bar,
+        {
+          top: insets.top,
+          paddingLeft: padLeft,
+          paddingRight: padRight,
+        },
+      ]}
       pointerEvents="box-none"
     >
       {/* Readability scrim over the banner, fades out as the solid bar arrives */}
@@ -122,7 +129,6 @@ export default function ProfileCompactBar({
 const styles = StyleSheet.create({
   bar: {
     position: "absolute",
-    top: 0,
     left: 0,
     right: 0,
     height: COMPACT_BAR_HEIGHT,

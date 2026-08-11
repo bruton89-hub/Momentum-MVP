@@ -471,6 +471,21 @@ interface OwnedStorageObject {
   path: string;
 }
 
+const POST_OWNER_FIELDS = ["userId", "authorId", "uid", "ownerId"] as const;
+
+/**
+ * Resolve post ownership with the same precedence as the client normalizer.
+ * Modern posts always have userId; the aliases keep legitimate legacy posts
+ * deletable without letting a lower-priority conflicting field override it.
+ */
+function postOwnerId(post: Record<string, unknown>): string | null {
+  for (const field of POST_OWNER_FIELDS) {
+    const value = post[field];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return null;
+}
+
 function storageObjectFromValue(
   value: unknown,
   ownerId: string
@@ -544,7 +559,7 @@ export const deletePost = onCall<
     }
 
     const post = (postSnap.data() ?? {}) as Record<string, unknown>;
-    if (post.userId !== uid) {
+    if (postOwnerId(post) !== uid) {
       throw new HttpsError(
         "permission-denied",
         "You can only delete your own posts."
@@ -588,7 +603,8 @@ export const deletePost = onCall<
     await db.runTransaction(async (transaction) => {
       const latestPost = await transaction.get(postRef);
       if (!latestPost.exists) return;
-      if (latestPost.get("userId") !== uid) {
+      const latestPostData = (latestPost.data() ?? {}) as Record<string, unknown>;
+      if (postOwnerId(latestPostData) !== uid) {
         throw new HttpsError(
           "permission-denied",
           "You can only delete your own posts."

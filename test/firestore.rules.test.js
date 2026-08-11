@@ -333,6 +333,31 @@ test("current rules deny unauthenticated post deletion", async () => {
   await assertFails(deleteDoc(doc(unauthenticatedDb(current), "posts/post-a")));
 });
 
+test("current rules allow only the resolved owner to delete legacy post shapes", async () => {
+  const legacyPosts = [
+    ["posts/legacy-author", { authorId: "user-a" }],
+    ["posts/legacy-uid", { uid: "user-a" }],
+    ["posts/legacy-owner", { ownerId: "user-a" }],
+  ];
+  await seed(current, legacyPosts);
+
+  for (const [postPath] of legacyPosts) {
+    await assertFails(deleteDoc(doc(authenticatedDb(current, "user-b"), postPath)));
+    await assertSucceeds(deleteDoc(doc(authenticatedDb(current, "user-a"), postPath)));
+  }
+
+  await seed(current, [[
+    "posts/conflicting-owner",
+    { userId: "user-a", authorId: "user-b" },
+  ]]);
+  await assertFails(
+    deleteDoc(doc(authenticatedDb(current, "user-b"), "posts/conflicting-owner"))
+  );
+  await assertSucceeds(
+    deleteDoc(doc(authenticatedDb(current, "user-a"), "posts/conflicting-owner"))
+  );
+});
+
 test("hardened fixture limits post owner updates to editable fields", async () => {
   await seed(hardened, [["posts/post-a", post]]);
   const db = authenticatedDb(hardened, "user-a");
