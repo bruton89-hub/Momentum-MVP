@@ -4,6 +4,21 @@ Momentum MVP is an Expo + Firebase mobile app for sports creators to post media,
 
 The app uses Expo Router for navigation, Firebase Auth for accounts, Firestore for social data, Firebase Storage for media, and Firebase Cloud Functions for server-side battle finalization.
 
+## Product Preview
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/home-feed.jpg" alt="Momentum home feed" width="220"><br><sub>Home Feed</sub></td>
+    <td align="center"><img src="docs/screenshots/discover.jpg" alt="Momentum athlete discovery" width="220"><br><sub>Discover</sub></td>
+    <td align="center"><img src="docs/screenshots/athlete-profile.jpg" alt="Momentum athlete profile" width="220"><br><sub>Athlete Profile</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/battle-tie-result.jpg" alt="Momentum tied battle result" width="220"><br><sub>Battle Tie Result</sub></td>
+    <td align="center"><img src="docs/screenshots/battle-winner-result.jpg" alt="Momentum winning battle result" width="220"><br><sub>Battle Winner Result</sub></td>
+    <td></td>
+  </tr>
+</table>
+
 ## Features
 
 - Email/password registration and login
