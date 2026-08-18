@@ -12,6 +12,8 @@
     "test:contracts": "node --test test/contracts.test.js",
     "test:post-deletion": "node --test test/deletePost.test.js",
     "test:battle-finalization": "node --test test/finalizeBattle.test.js",
+    "test:engagement-concurrency": "node --test test/engagementConcurrency.test.js",
+    "test:review-finalization": "node --test test/reviewFinalization.test.js",
     "serve": "npm run build && firebase emulators:start --only functions",
     "shell": "npm run build && firebase functions:shell",
     "deploy": "firebase deploy --only functions",

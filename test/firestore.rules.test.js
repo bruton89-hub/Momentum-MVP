@@ -84,10 +84,20 @@ const profile = {
   losses: 0,
 };
 
+// Media URLs mirror the shape the app writes: Firebase Storage download URLs
+// whose object path lives under posts/{ownerUid}/ — the hardened create rule
+// verifies that prefix belongs to the writer.
+function ownedMediaUrl(uid, file) {
+  return (
+    "https://firebasestorage.googleapis.com/v0/b/demo-momentum.appspot.com/o/" +
+    `posts%2F${uid}%2F${file}?alt=media&token=test-token`
+  );
+}
+
 const post = {
   userId: "user-a",
   username: "athlete-a",
-  mediaUrl: "https://example.test/post.jpg",
+  mediaUrl: ownedMediaUrl("user-a", "post.jpg"),
   mediaType: "image",
   caption: "",
   battleEnabled: true,
@@ -105,17 +115,62 @@ const openBattle = {
   statsRecorded: false,
 };
 
+// Backing posts for battle entries. The hardened battle rules verify each
+// player entry against the real post it claims to represent, so client-side
+// battle creations in these tests seed these first.
+const battlePostA = {
+  userId: "user-a",
+  username: "athlete-a",
+  mediaUrl: ownedMediaUrl("user-a", "a.jpg"),
+  mediaType: "image",
+  caption: "",
+  battleEnabled: true,
+  likesCount: 0,
+};
+
+const battlePostB = {
+  userId: "user-b",
+  username: "athlete-b",
+  mediaUrl: ownedMediaUrl("user-b", "b.jpg"),
+  mediaType: "image",
+  caption: "",
+  battleEnabled: true,
+  likesCount: 0,
+};
+
+function seedBattlePosts(environment) {
+  return seed(environment, [
+    ["posts/post-a", battlePostA],
+    ["posts/post-b", battlePostB],
+  ]);
+}
+
+function playerEntryA() {
+  return {
+    userId: "user-a",
+    username: "athlete-a",
+    avatar: "",
+    mediaUrl: battlePostA.mediaUrl,
+    mediaType: "image",
+    postId: "post-a",
+  };
+}
+
+function playerEntryB() {
+  return {
+    userId: "user-b",
+    username: "athlete-b",
+    avatar: "",
+    mediaUrl: battlePostB.mediaUrl,
+    mediaType: "image",
+    postId: "post-b",
+  };
+}
+
 function newBattle(overrides = {}) {
   return {
     creatorId: "user-a",
-    playerA: {
-      userId: "user-a",
-      username: "athlete-a",
-      avatar: "",
-      mediaUrl: "https://example.test/a.jpg",
-      mediaType: "image",
-      postId: "post-a",
-    },
+    playerA: playerEntryA(),
     playerB: null,
     status: "open",
     votesA: 0,
@@ -422,15 +477,17 @@ test("hardened fixture denies client like marker writes", async () => {
 
 test("current rules allow open challenge acceptance", async () => {
   await seed(current, [["battles/battle-a", openBattle]]);
+  await seedBattlePosts(current);
   await assertSucceeds(
     updateDoc(doc(authenticatedDb(current, "user-b"), "battles/battle-a"), {
-      playerB: { userId: "user-b" },
+      playerB: playerEntryB(),
       status: "live",
     })
   );
 });
 
 test("current rules allow only the two legitimate battle creation shapes", async () => {
+  await seedBattlePosts(current);
   const db = authenticatedDb(current, "user-a");
   await assertSucceeds(
     setDoc(doc(db, "battles/new-open"), newBattle())
@@ -440,22 +497,8 @@ test("current rules allow only the two legitimate battle creation shapes", async
       doc(db, "battles/new-live"),
       newBattle({
         status: "live",
-        playerA: {
-          userId: "user-b",
-          username: "athlete-b",
-          avatar: "",
-          mediaUrl: "https://example.test/b.jpg",
-          mediaType: "image",
-          postId: "post-b",
-        },
-        playerB: {
-          userId: "user-a",
-          username: "athlete-a",
-          avatar: "",
-          mediaUrl: "https://example.test/a.jpg",
-          mediaType: "image",
-          postId: "post-a",
-        },
+        playerA: playerEntryB(),
+        playerB: playerEntryA(),
       })
     )
   );
@@ -489,6 +532,7 @@ test("current rules reject forged battle results and vote totals at creation", a
 });
 
 test("deterministic post and battle IDs make acknowledgement-loss retries idempotent", async () => {
+  await seedBattlePosts(current);
   const db = authenticatedDb(current, "user-a");
   const stablePost = {
     ...post,
@@ -504,9 +548,12 @@ test("deterministic post and battle IDs make acknowledgement-loss retries idempo
   await assertSucceeds(setDoc(doc(db, "battles/battle-mutation-1"), stableBattle));
   await assertSucceeds(setDoc(doc(db, "battles/battle-mutation-1"), stableBattle));
 
+  // Counts include the two seeded backing posts (post-a / post-b) required by
+  // the battle-provenance rules; the replayed client mutation must still add
+  // exactly one document of each kind.
   const posts = await assertSucceeds(getDocs(collection(db, "posts")));
   const battles = await assertSucceeds(getDocs(collection(db, "battles")));
-  if (posts.size !== 1) throw new Error(`expected one post, got ${posts.size}`);
+  if (posts.size !== 3) throw new Error(`expected three posts, got ${posts.size}`);
   if (battles.size !== 1) throw new Error(`expected one battle, got ${battles.size}`);
 
   // A genuinely new mutation uses another preallocated ID and creates a second
@@ -515,7 +562,7 @@ test("deterministic post and battle IDs make acknowledgement-loss retries idempo
   await assertSucceeds(setDoc(doc(db, "battles/battle-mutation-2"), stableBattle));
   const postsAfterNew = await assertSucceeds(getDocs(collection(db, "posts")));
   const battlesAfterNew = await assertSucceeds(getDocs(collection(db, "battles")));
-  if (postsAfterNew.size !== 2) throw new Error(`expected two posts, got ${postsAfterNew.size}`);
+  if (postsAfterNew.size !== 4) throw new Error(`expected four posts, got ${postsAfterNew.size}`);
   if (battlesAfterNew.size !== 2) throw new Error(`expected two battles, got ${battlesAfterNew.size}`);
 });
 

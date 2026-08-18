@@ -80,7 +80,7 @@ const result = spawnSync(
     "demo-momentum-phase0",
     "--only",
     "firestore",
-    "node --test test/firestore.rules.test.js",
+    "node --test test/firestore.rules.test.js test/firestore.rules.hardening.test.js test/review.verification.test.js",
   ],
   {
     cwd: root,

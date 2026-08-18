@@ -12,8 +12,20 @@
     "typecheck": "tsc --noEmit",
     "test:rules": "node scripts/run-firestore-rules-tests.js",
     "test:functions:emulator": "npm --prefix functions run build && CI=1 XDG_CONFIG_HOME=$PWD/.firebase-config XDG_CACHE_HOME=$PWD/.firebase-cache FIREBASE_EMULATORS_PATH=$PWD/.firebase-data firebase emulators:exec --project demo-momentum-phase0 --only functions \"FUNCTIONS_EMULATOR=true npm --prefix functions run test:contracts\"",
-    "verify": "npm run typecheck && npm run test:battles && npm --prefix functions run build && npm run test:rules && npm run test:functions:emulator",
-    "test:battles": "node --test test/battleSections.test.js"
+    "test:functions:integration": "npm --prefix functions run build && CI=1 XDG_CONFIG_HOME=$PWD/.firebase-config XDG_CACHE_HOME=$PWD/.firebase-cache FIREBASE_EMULATORS_PATH=$PWD/.firebase-data firebase emulators:exec --project demo-momentum-phase0 --only firestore,storage \"npm --prefix functions run test:battle-finalization && npm --prefix functions run test:post-deletion && npm --prefix functions run test:engagement-concurrency && npm --prefix functions run test:review-finalization\"",
+    "verify": "npm run typecheck && npm run test:battles && npm --prefix functions run build && npm run test:rules && npm run test:functions:emulator && npm run test:functions:integration && npm run loadtest:safety",
+    "test:battles": "node --test test/battleSections.test.js",
+    "loadtest:safety": "node --test tools/load-test/test/guard.test.js",
+    "loadtest:seed": "node tools/load-test/src/cli.js seed",
+    "loadtest:cleanup": "node tools/load-test/src/cli.js cleanup",
+    "loadtest:tier": "node tools/load-test/src/cli.js tier",
+    "loadtest:100": "node tools/load-test/src/cli.js tier --users 100",
+    "loadtest:250": "node tools/load-test/src/cli.js tier --users 250",
+    "loadtest:500": "node tools/load-test/src/cli.js tier --users 500",
+    "loadtest:1000": "node tools/load-test/src/cli.js tier --users 1000",
+    "loadtest:battle": "node tools/load-test/src/cli.js battle-stress",
+    "loadtest:feed": "node tools/load-test/src/cli.js feed-bench",
+    "loadtest:emulator": "CI=1 XDG_CONFIG_HOME=$PWD/.firebase-config XDG_CACHE_HOME=$PWD/.firebase-cache FIREBASE_EMULATORS_PATH=$PWD/.firebase-data firebase emulators:exec --project demo-momentum-loadtest --only auth,firestore,functions,storage"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "1.21.0",

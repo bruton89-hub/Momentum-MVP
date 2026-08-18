@@ -28,6 +28,61 @@ service cloud.firestore {
     function changedKeys() {
       return request.resource.data.diff(resource.data).affectedKeys();
     }
+    // Client clocks are written as createdAt (deliberate: serverTimestamp()
+    // resolves to null in the local cache and breaks newest-first ordering of
+    // just-created docs). Bound the skew so a forged timestamp cannot pin a
+    // document to the top of createdAt-ordered feeds indefinitely: at most
+    // 15 minutes ahead of the server clock, at most 48 hours behind it.
+    function isPlausibleClientTime(value) {
+      return value is timestamp
+        && value < request.time + duration.value(15, 'm')
+        && value > request.time - duration.value(48, 'h');
+    }
+    // SERVER-ONLY status/credibility fields. wins/losses/posts are written by
+    // finalizeBattle/deletePost (Admin SDK); the rest are reserved for future
+    // server-side verification workflows. No client may ever write any of
+    // them — a self-granted "verified" badge is identity forgery in a youth
+    // sports app.
+    function touchesProtectedUserFields(keys) {
+      return keys.hasAny([
+        'wins', 'losses', 'posts',
+        'verified', 'isVerified', 'coachVerified',
+        'tournamentChampion', 'topRanked', 'momentumScore'
+      ]);
+    }
+    // The search index must mirror the display value it indexes. Without this
+    // a modified client can register username "VictimName" while writing an
+    // unrelated usernameLower, evading the client-side duplicate-handle check
+    // (isUsernameTaken queries usernameLower only).
+    function usernameSearchFieldConsistent(data) {
+      return data.get('usernameLower', data.get('username', '').lower())
+        == data.get('username', '').lower();
+    }
+    // Denormalized author identity on user-generated docs must be the writer's
+    // real identity. '' is tolerated because a legitimate client can act in
+    // the moments before its decorative profile store hydrates.
+    function matchesAuthorUsername(value) {
+      return value is string
+        && (value == ''
+          || !exists(/databases/$(database)/documents/users/$(request.auth.uid))
+          || value == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('username', value));
+    }
+    // The athlete's current profile handle, or '' when they have no profile
+    // document yet. Used to accept a battle entry whose display name reflects
+    // a rename that happened after the backing post was written.
+    function currentProfileUsername(uid) {
+      return exists(/databases/$(database)/documents/users/$(uid))
+        ? get(/databases/$(database)/documents/users/$(uid)).data.get('username', '')
+        : '';
+    }
+    // Media on user-generated docs must live under the writer's own Storage
+    // prefix (posts/{uid}/...), as a plain path or URL-encoded download URL.
+    // Blocks publishing another athlete's video as your own.
+    function isOwnMediaPath(value, uid) {
+      return value is string
+        && (value.matches('.*posts%2F' + uid + '%2F.*')
+          || value.matches('.*posts/' + uid + '/.*'));
+    }
 
     // ─── Users ─────────────────────────────────────────────────────────────────
     // wins / losses are SERVER-ONLY: they are written exclusively by the
@@ -39,17 +94,62 @@ service cloud.firestore {
       allow create: if isOwner(userId)
         && request.resource.data.wins == 0
         && request.resource.data.losses == 0
-        && request.resource.data.posts == 0;
+        && request.resource.data.posts == 0
+        // Credibility/status badges are server-granted only. A brand-new
+        // profile may not arrive pre-verified.
+        && !request.resource.data.keys().hasAny([
+          'verified', 'isVerified', 'coachVerified',
+          'tournamentChampion', 'topRanked', 'momentumScore'
+        ])
+        && usernameSearchFieldConsistent(request.resource.data);
       allow update: if isOwner(userId)
-        && !changedKeys().hasAny(['wins', 'losses', 'posts']);
+        && !touchesProtectedUserFields(changedKeys())
+        && usernameSearchFieldConsistent(request.resource.data);
       // No client deletes.
     }
 
     // ─── Posts ─────────────────────────────────────────────────────────────────
     match /posts/{postId} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn()
-        && request.resource.data.userId == request.auth.uid;
+
+      // Every field the current client's createPost writes, and nothing else.
+      // Server-derived presentation fields (verified, momentumScore, battleWon,
+      // isLive, pinned, commentsCount, …) are excluded by omission: normalizePost
+      // reads them, so letting a client forge them at create time manufactured
+      // credibility and feed-ranking manipulation.
+      function hasValidNewPostShape() {
+        return request.resource.data.keys().hasOnly([
+            'userId', 'authorId', 'uid',
+            'username',
+            'userAvatar', 'avatarUrl', 'authorAvatar',
+            'mediaUrl', 'mediaType', 'originalMediaUrl', 'videoEdit',
+            'caption', 'battleEnabled', 'likesCount',
+            'sport', 'position', 'school', 'teamName',
+            'createdAt', 'updatedAt'
+          ])
+          // All author aliases must be the authenticated writer.
+          && request.resource.data.userId == request.auth.uid
+          && request.resource.data.get('authorId', request.auth.uid) == request.auth.uid
+          && request.resource.data.get('uid', request.auth.uid) == request.auth.uid
+          // Engagement counters start at their neutral value.
+          && request.resource.data.likesCount == 0
+          && request.resource.data.mediaType in ['image', 'video']
+          && request.resource.data.battleEnabled is bool
+          && request.resource.data.caption is string
+          && request.resource.data.caption.size() <= 2200
+          // A post's media must live under the author's own Storage prefix.
+          && isOwnMediaPath(request.resource.data.mediaUrl, request.auth.uid)
+          && (!request.resource.data.keys().hasAny(['originalMediaUrl'])
+            || isOwnMediaPath(request.resource.data.originalMediaUrl, request.auth.uid))
+          // Client timestamps are bounded, not trusted (see isPlausibleClientTime).
+          && isPlausibleClientTime(request.resource.data.createdAt)
+          && isPlausibleClientTime(request.resource.data.updatedAt)
+          // Displayed author name must be the writer's real handle (or '' while
+          // the profile store hydrates).
+          && matchesAuthorUsername(request.resource.data.username);
+      }
+
+      allow create: if isSignedIn() && hasValidNewPostShape();
       allow update: if isOwner(resource.data.userId)
         && changedKeys().hasOnly(['caption', 'battleEnabled', 'updatedAt'])
         && request.resource.data.userId == resource.data.userId
@@ -117,20 +217,69 @@ service cloud.firestore {
           ]
           && request.resource.data.durationHours in [24, 48, 168]
           && request.resource.data.endTime is timestamp
-          && request.resource.data.endTime > request.time;
+          && request.resource.data.endTime > request.time
+          && isPlausibleClientTime(request.resource.data.createdAt);
+      }
+
+      // A battle entry must be backed by a real post that belongs to the
+      // athlete it claims to represent, and must display that post's actual
+      // media. Without this, any signed-in client could enter a battle with
+      // another athlete's video as its own (content theft that converts a
+      // victim's highlight into the attacker's votes), or pit a victim
+      // against fabricated media they never posted.
+      function playerEntryBackedByOwnPost(player) {
+        let post = get(/databases/$(database)/documents/posts/$(player.postId)).data;
+        return player.postId is string
+          && player.postId.size() > 0
+          && postOwnerId(post) == player.userId
+          // Media must be the media actually on the backing post. The alias
+          // fields are required, not optional: normalizePost resolves
+          // mediaUrl || mediaURL || photoURL, so a legacy document surfaces a
+          // URL to the client that is NOT in the canonical `mediaUrl` field.
+          // Checking only the canonical field made every such legacy post
+          // permanently un-battleable.
+          && (player.mediaUrl == post.get('mediaUrl', '')
+            || player.mediaUrl == post.get('mediaURL', '')
+            || player.mediaUrl == post.get('photoURL', '')
+            || player.mediaUrl == post.get('originalMediaUrl', ''))
+          // The displayed name must be a name this athlete legitimately holds:
+          // either the one stored on the backing post, or their CURRENT profile
+          // handle. Both are required. Requiring only the post's name broke
+          // every athlete who renamed themselves after posting — their client
+          // builds the entry from the current profile, so an old post could
+          // never be battled again. Requiring only the current profile would
+          // symmetrically break challenging an athlete who has since renamed,
+          // because that entry is copied from their older post.
+          //
+          // Scope of this check: it stops an arbitrary typed-in name. It is NOT
+          // the primary anti-impersonation control — that is the userId↔post
+          // ownership binding above, which is what actually prevents content
+          // theft and false stat attribution. An attacker can still set their
+          // own profile handle to any unclaimed value; handle uniqueness is a
+          // separate, still-open issue (username reservation).
+          && (player.username == post.get('username', player.username)
+            || player.username == currentProfileUsername(player.userId));
       }
 
       function isValidOpenChallengeCreate() {
         return request.resource.data.status == 'open'
           && request.resource.data.playerB == null
-          && request.resource.data.playerA.userId == request.auth.uid;
+          && request.resource.data.playerA.userId == request.auth.uid
+          && playerEntryBackedByOwnPost(request.resource.data.playerA);
       }
 
+      // Direct challenge: the creator is playerB (challenger) and playerA is
+      // the challenged athlete — so BOTH entries are provenance-checked
+      // against their backing posts. The creator legitimately writes another
+      // athlete's identity into playerA, but only as copied from that
+      // athlete's real post.
       function isValidLiveChallengeCreate() {
         return request.resource.data.status == 'live'
           && request.resource.data.playerB is map
           && request.resource.data.playerB.userId == request.auth.uid
-          && request.resource.data.playerA.userId != request.auth.uid;
+          && request.resource.data.playerA.userId != request.auth.uid
+          && playerEntryBackedByOwnPost(request.resource.data.playerA)
+          && playerEntryBackedByOwnPost(request.resource.data.playerB);
       }
 
       allow create: if isSignedIn()
@@ -146,7 +295,11 @@ service cloud.firestore {
           && request.resource.data.status == 'live'
           && changedKeys().hasOnly(['playerB', 'status'])
           && request.resource.data.playerB.userId == request.auth.uid
-          && resource.data.creatorId != request.auth.uid;
+          && resource.data.creatorId != request.auth.uid
+          // The accepter's entry must be backed by their own real post — same
+          // provenance check as creation, so an accept cannot smuggle in
+          // stolen media or a forged identity either.
+          && playerEntryBackedByOwnPost(request.resource.data.playerB);
       }
 
       // A retry after the server committed but the acknowledgement was lost
@@ -258,14 +411,22 @@ service cloud.firestore {
     // Fields: postId, userId, username, avatar, text, createdAt
     match /comments/{commentId} {
       allow read: if isSignedIn();
-      // Author-owned create with basic shape validation.
+      // Author-owned create with shape validation. The displayed commenter
+      // identity must be the writer's real handle — comment notifications
+      // trust comment.username, so a forged name here propagated into the
+      // recipient's notification feed as a verified-looking impersonation.
       allow create: if isSignedIn()
+        && request.resource.data.keys().hasOnly([
+          'postId', 'userId', 'username', 'avatar', 'text', 'createdAt'
+        ])
         && request.resource.data.userId == request.auth.uid
         && request.resource.data.postId is string
         && request.resource.data.postId.size() > 0
         && request.resource.data.text is string
         && request.resource.data.text.size() > 0
-        && request.resource.data.text.size() <= 300;
+        && request.resource.data.text.size() <= 300
+        && isPlausibleClientTime(request.resource.data.createdAt)
+        && matchesAuthorUsername(request.resource.data.username);
       // Authors may delete their own comments. Comments are immutable.
       allow delete: if isOwner(resource.data.userId);
     }
@@ -278,8 +439,13 @@ service cloud.firestore {
       allow read: if isSignedIn();
       // A user can only create a follow doc where they are the follower,
       // and the doc ID must match the {followerId}_{followingId} pattern.
+      // The target must be a real other user: self-follows and empty targets
+      // were previously accepted (only client code guarded them).
       allow create: if isSignedIn()
         && request.resource.data.followerId == request.auth.uid
+        && request.resource.data.followingId is string
+        && request.resource.data.followingId.size() > 0
+        && request.resource.data.followingId != request.auth.uid
         && followId == (request.auth.uid + '_' + request.resource.data.followingId);
       // A user can only delete their own follow docs
       allow delete: if isSignedIn()

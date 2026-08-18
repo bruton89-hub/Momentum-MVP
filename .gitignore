@@ -44,3 +44,9 @@ yarn-error.log*
 
 expo-env.d.ts
 # @end expo-cli
+
+# Temporary transfer artifacts from agent sessions (never commit)
+_to_delete/
+
+# Load-test benchmark outputs are regenerable evidence, not source
+tools/load-test/results/

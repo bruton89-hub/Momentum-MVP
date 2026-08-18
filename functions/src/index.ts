@@ -170,20 +170,29 @@ export const finalizeBattle = onCall(
       // Stored counters are not accepted on faith. Every legitimate vote has a
       // server-created marker, so the markers must exactly reproduce both
       // counters before stats or result notifications can be written.
+      //
+      // Counted with aggregation queries rather than by streaming the vote
+      // documents: the previous full-collection read inside the transaction
+      // scaled linearly with vote volume (a battle with thousands of votes
+      // pushed the transaction toward Firestore's read-set and time limits,
+      // at which point the battle could never finalize). Aggregates keep the
+      // integrity check exact at ~1 billed read per 1,000 markers, and
+      // running them through tx.get keeps the reconciliation serialized
+      // against concurrent castBattleVote transactions, which always touch
+      // the battle document this transaction already read.
       const votesA = typeof data.votesA === "number" ? data.votesA : 0;
       const votesB = typeof data.votesB === "number" ? data.votesB : 0;
-      const voteSnapshot = await tx.get(
-        db.collection("votes").where("battleId", "==", battleId)
-      );
-      let recordedVotesA = 0;
-      let recordedVotesB = 0;
-      let malformedVote = false;
-      voteSnapshot.forEach((vote) => {
-        const side = vote.get("side");
-        if (side === "A") recordedVotesA += 1;
-        else if (side === "B") recordedVotesB += 1;
-        else malformedVote = true;
-      });
+      const voteMarkers = db.collection("votes").where("battleId", "==", battleId);
+      const [totalAgg, sideAAgg, sideBAgg] = await Promise.all([
+        tx.get(voteMarkers.count()),
+        tx.get(voteMarkers.where("side", "==", "A").count()),
+        tx.get(voteMarkers.where("side", "==", "B").count()),
+      ]);
+      const recordedVotesA = sideAAgg.data().count;
+      const recordedVotesB = sideBAgg.data().count;
+      // Any marker whose side is neither "A" nor "B" is malformed.
+      const malformedVote =
+        totalAgg.data().count !== recordedVotesA + recordedVotesB;
       if (
         malformedVote ||
         votesA !== recordedVotesA ||

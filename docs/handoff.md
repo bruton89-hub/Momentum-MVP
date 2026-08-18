@@ -4,7 +4,16 @@ July 8, 2026 · Expo SDK 50 / RN 0.73 / expo-router 3 / Firebase web SDK 10
 
 ## Status
 
-Closed-beta ready pending device QA. All work is **uncommitted in the working tree** (this includes pre-existing changes to `hooks/usePosts.ts`, `hooks/useProfile.ts`, `services/postRepository.ts`, and `storage.rules` that predate this pass — review those before committing). `tsc --noEmit` passes. Firebase integrations untouched.
+Closed-beta ready pending device QA. `tsc --noEmit` passes. Firebase integrations untouched.
+
+> **Status correction (18 Aug 2026, independent review).** This note previously
+> stated that all work was "uncommitted in the working tree", naming
+> `hooks/usePosts.ts`, `hooks/useProfile.ts`, `services/postRepository.ts` and
+> `storage.rules` as pending. That statement is stale and was misleading: all
+> four are committed — they landed in `35438f82` ("release: harden Momentum
+> creation, battles, notifications, and lifecycle") — and `git diff HEAD`
+> reported zero tracked modifications at `2dfd8cdf`. Everything described
+> below this line is committed history, not work awaiting review.
 
 ## Latest UI changes (beta-polish pass)
 
