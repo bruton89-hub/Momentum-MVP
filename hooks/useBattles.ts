@@ -198,148 +198,30 @@ function normalizeBattle(id: string, data: Record<string, unknown>): Battle {
   };
 }
 
-// ─── Helper: resolve the definitive end time for any battle ──────────────────
-// Priority: stored endTime → createdAt + durationHours/Minutes → createdAt + 24 h
+// ─── Battle status + queue helpers ───────────────────────────────────────────
+// The pure logic lives in services/battleQueue.ts so it can be imported by
+// tests without pulling in the Firebase SDK. Re-exported here so every existing
+// `@/hooks/useBattles` import keeps working unchanged.
 
-export function getBattleEndTime(battle: Battle): number | null {
-  // 1. Authoritative stored endTime
-  const stored = tsToMs(battle.endTime);
-  if (stored) return stored;
+// Imported for use inside this module (a re-export alone does not bind locally).
+import { getBattleStatus } from "@/services/battleQueue";
 
-  // 2. Compute from createdAt + explicit duration
-  const createdMs = tsToMs(battle.createdAt);
-  if (!createdMs) return null;
-
-  if (typeof battle.durationMinutes === "number") {
-    return createdMs + battle.durationMinutes * 60_000;
-  }
-  const hours = typeof battle.durationHours === "number" ? battle.durationHours : 24;
-  return createdMs + hours * 3_600_000;
-}
-
-// ─── Helper: check if battle has expired ─────────────────────────────────────
-
-export function isBattleExpired(battle: Battle): boolean {
-  const endMs = getBattleEndTime(battle);
-  if (!endMs) return false;
-  return Date.now() > endMs;
-}
-
-// ─── Helper: did anyone actually accept this challenge? ──────────────────────
-/**
- * True only when a real opponent exists. This is the line between a contest
- * and an invitation nobody answered — everything that counts (Completed lists,
- * battle totals, records) gates on it.
- */
-export function isMatchedBattle(battle: Battle): boolean {
-  return !!battle.playerB?.userId && !!battle.playerA?.userId;
-}
-
-// ─── Helper: derive logical status (accounts for expiry) ─────────────────────
-// Always use this instead of battle.status directly when rendering UI.
-// Rules:
-//   "expired"   if the window closed and no opponent ever accepted
-//   "completed" if stored status is completed OR a MATCHED battle has expired
-//   "live"      if playerA + playerB present and not expired
-//   "open"      if playerB is missing and not expired
-//
-// The unmatched case is checked first and deliberately overrides a stored
-// status of "completed": battles finalized before the expired status existed
-// are still sitting in Firestore marked completed, and this reclassifies them
-// on read so they disappear from the UI without waiting for the backfill.
-
-export function getBattleStatus(battle: Battle): BattleStatus {
-  if (battle.status === "expired") return "expired";
-  const expired = isBattleExpired(battle);
-  if (!isMatchedBattle(battle)) {
-    // Never accepted. Expired once its window closed; otherwise still open.
-    return expired || battle.status === "completed" ? "expired" : "open";
-  }
-  if (battle.status === "completed") return "completed";
-  if (expired) return "completed";
-  if (battle.status === "live") return "live";
-  return "open";
-}
-
-/** Battles that count: matched contests, live or completed. */
-export function isCountableBattle(battle: Battle): boolean {
-  const status = getBattleStatus(battle);
-  return status === "live" || status === "completed";
-}
-
-// ─── Helper: human-readable time remaining / elapsed ─────────────────────────
-
-export function getTimeRemainingLabel(battle: Battle): string {
-  const endMs = getBattleEndTime(battle);
-  if (!endMs) return "";
-  const diff = endMs - Date.now();
-  if (diff <= 0) return "Ended";
-  const hours = Math.floor(diff / 3_600_000);
-  const mins  = Math.floor((diff % 3_600_000) / 60_000);
-  if (hours > 48) return `${Math.floor(hours / 24)}d remaining`;
-  if (hours > 0)  return `${hours}h ${mins}m remaining`;
-  return `${mins}m remaining`;
-}
+export {
+  getBattleEndTime,
+  isBattleExpired,
+  isMatchedBattle,
+  getBattleStatus,
+  isCountableBattle,
+  getTimeRemainingLabel,
+  getBattleWinner,
+  isVotableBattle,
+  listVotableBattles,
+  countVotableBattles,
+  getNextVotableBattle,
+} from "@/services/battleQueue";
 
 // Keep old name for backwards-compat with BattleCard import
-export const timeRemaining = getTimeRemainingLabel;
-
-// ─── Helper: client-side winner resolution ───────────────────────────────────
-// Used for completed battles that don't have winner written to Firestore yet.
-// Returns:
-//   BattlePlayer  — the winning player object
-//   "tie"         — equal votes
-//   null          — battle not completed yet
-
-export function getBattleWinner(
-  battle: Battle
-): BattlePlayer | "tie" | null {
-  if (getBattleStatus(battle) !== "completed") return null;
-
-  // Prefer the stored winner field (may be set by Cloud Functions)
-  if (battle.winner) {
-    if (battle.playerA?.userId === battle.winner) return battle.playerA;
-    if (battle.playerB?.userId === battle.winner) return battle.playerB;
-  }
-
-  const votesA = battle.votesA ?? 0;
-  const votesB = battle.votesB ?? 0;
-  if (votesA === votesB) return "tie";
-  if (votesA > votesB)  return battle.playerA ?? "tie";
-  return battle.playerB ?? "tie";
-}
-
-// ─── Helper: find the next votable battle after a vote ───────────────────────
-// Searches forward from currentBattleId (wraps once). Returns null when none.
-
-export function getNextVotableBattle({
-  battles,
-  currentBattleId,
-  currentUserId,
-  votedMap,
-}: {
-  battles: Battle[];
-  currentBattleId: string;
-  currentUserId: string | null | undefined;
-  votedMap: Map<string, "A" | "B">;
-}): Battle | null {
-  if (!currentUserId || battles.length === 0) return null;
-
-  function isVotable(b: Battle): boolean {
-    if (getBattleStatus(b) !== "live") return false;
-    if (!b.playerA || !b.playerB) return false;
-    if (b.playerA.userId === currentUserId) return false;
-    if (b.playerB.userId === currentUserId) return false;
-    if (votedMap.has(b.id)) return false;
-    return true;
-  }
-
-  const currentIndex = battles.findIndex((b) => b.id === currentBattleId);
-  const startIndex = currentIndex >= 0 ? currentIndex + 1 : 0;
-  const tail = battles.slice(startIndex);
-  const head = battles.slice(0, Math.max(0, currentIndex));
-  return [...tail, ...head].find(isVotable) ?? null;
-}
+export { getTimeRemainingLabel as timeRemaining } from "@/services/battleQueue";
 
 // ─── Create an open challenge (playerB = null) ────────────────────────────────
 

@@ -25,6 +25,7 @@ import {
   getBattleWinner,
   getTimeRemainingLabel,
   getNextVotableBattle,
+  isVotableBattle,
 } from "@/hooks/useBattles";
 import { uploadMedia, createPost } from "@/hooks/usePosts";
 import type { CreatePostInput } from "@/hooks/usePosts";
@@ -757,6 +758,13 @@ export default function BattlesScreen() {
   // Refresh battles when the tab gains focus (battles don't remount in tab nav)
   const refreshRef = React.useRef(refresh);
   refreshRef.current = refresh;
+
+  // Pull-to-refresh and manual retry re-open the whole queue: skipping is a
+  // session-scoped deferral, so a refresh must offer skipped battles again.
+  const manualRefreshAndResetSkips = useCallback(() => {
+    skippedIdsRef.current.clear();
+    return manualRefresh();
+  }, [manualRefresh]);
   const hasFocusedRef = React.useRef(false);
   useFocusEffect(
     useCallback(() => {
@@ -774,6 +782,12 @@ export default function BattlesScreen() {
   battlesRef.current = battles;
   const votedMapRef = React.useRef(votedMap);
   votedMapRef.current = votedMap;
+  // Battles the viewer skipped in THIS session. Deliberately session-scoped and
+  // never persisted: skipping defers a battle, it does not decline it, so a
+  // pull-to-refresh or re-entry offers it again. Held in a ref (not state)
+  // because only the queue helpers read it — re-rendering on skip would rebuild
+  // the memoised rows underneath the modal for no visible benefit.
+  const skippedIdsRef = React.useRef<Set<string>>(new Set());
   const votingBattleRef = React.useRef<string | null>(null);
   const advanceTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const advanceResolveRef = React.useRef<(() => void) | null>(null);
@@ -851,13 +865,19 @@ export default function BattlesScreen() {
   );
 
   // ── Honest per-tab counts (already-loaded data — no new queries) ────────────
+  // The Live badge counts LIVE battles only. It previously added
+  // openChallenges.length, so a tab holding one live battle and two unaccepted
+  // challenges rendered "Live (3)" — then the viewer correctly ran out of
+  // votable battles after a single vote and announced "All caught up", which
+  // read as a bug. Open challenges have no opponent and can never be voted on;
+  // they keep their own labelled section in the list.
   const tabCounts = useMemo(
     () => ({
-      live: live.length + openChallenges.length,
+      live: live.length,
       mine: myActive.length + myChallengesSent.length + myCompleted.length,
       completed: completed.length,
     }),
-    [live, openChallenges, myActive, myChallengesSent, myCompleted, completed]
+    [live, myActive, myChallengesSent, myCompleted, completed]
   );
 
   // ── Rows ────────────────────────────────────────────────────────────────────
@@ -951,14 +971,18 @@ export default function BattlesScreen() {
   //
   // The eligibility rules themselves are unchanged: live, not already voted,
   // signed in, matched, and not one of the two competitors.
+  // Single shared eligibility predicate (services/battleQueue.ts). The vote
+  // buttons, the featured hero, the Live count and the viewer queue all derive
+  // from this one function so they can no longer disagree with each other.
+  // A skipped battle is still votable — skipping only defers it — so the
+  // session skip list is ignored here.
   const canVoteOnBattle = useCallback(
     (battle: Battle): boolean =>
-      getBattleStatus(battle) === "live" &&
-      !votedMap.has(battle.id) &&
-      !!userId &&
-      !!battle.playerB &&
-      battle.playerA?.userId !== userId &&
-      battle.playerB?.userId !== userId,
+      isVotableBattle(
+        battle,
+        { currentUserId: userId, votedIds: votedMap },
+        { includeSkipped: true }
+      ),
     [votedMap, userId]
   );
 
@@ -971,6 +995,7 @@ export default function BattlesScreen() {
           currentBattleId: battle.id,
           currentUserId: userId,
           votedMap: votedMapRef.current,
+          skippedIds: skippedIdsRef.current,
         }) !== null
       );
     },
@@ -1015,11 +1040,16 @@ export default function BattlesScreen() {
       const updatedVotedMap = new Map(votedMapRef.current);
       updatedVotedMap.set(battleId, side);
 
+      // A voted battle leaves the queue permanently; drop any stale skip entry
+      // so it cannot linger and mask a genuinely empty queue later.
+      skippedIdsRef.current.delete(battleId);
+
       const next = getNextVotableBattle({
         battles: battlesRef.current,
         currentBattleId: battleId,
         currentUserId: userId,
         votedMap: updatedVotedMap,
+        skippedIds: skippedIdsRef.current,
       });
 
       if (next) {
@@ -1036,19 +1066,36 @@ export default function BattlesScreen() {
 
   const handleSkipBattle = useCallback(
     (battleId: string) => {
+      // Record the skip BEFORE searching, so the queue advances past it instead
+      // of cycling back to the battle the viewer just dismissed.
+      skippedIdsRef.current.add(battleId);
+
       const next = getNextVotableBattle({
         battles: battlesRef.current,
         currentBattleId: battleId,
         currentUserId: userId,
         votedMap: votedMapRef.current,
+        skippedIds: skippedIdsRef.current,
       });
 
       if (next) {
         setDetailBattle(next);
-      } else {
-        setDetailBattle(null);
-        showAlert("All caught up! 🎉", "No more votable battles right now.");
+        return;
       }
+
+      // Genuinely nothing left. Distinguish "you voted on everything" from
+      // "you skipped past everything", and clear the skip list so re-entering
+      // the viewer offers the deferred battles again rather than stranding the
+      // athlete on an empty queue.
+      const skippedCount = skippedIdsRef.current.size;
+      skippedIdsRef.current.clear();
+      setDetailBattle(null);
+      showAlert(
+        "All caught up! 🎉",
+        skippedCount > 0
+          ? "You've seen every live battle. Pull to refresh to run through the skipped ones again."
+          : "No more votable battles right now."
+      );
     },
     [userId]
   );
@@ -1215,7 +1262,7 @@ export default function BattlesScreen() {
     return (
       <SafeAreaView style={styles.safe} edges={["top"]}>
         <EmptyState icon="⚠️" title="Failed to load battles" subtitle={error}
-          actionLabel="Retry" onAction={manualRefresh} />
+          actionLabel="Retry" onAction={manualRefreshAndResetSkips} />
       </SafeAreaView>
     );
   }
@@ -1248,7 +1295,7 @@ export default function BattlesScreen() {
             Couldn’t refresh battles. Showing the last loaded results.
           </Text>
           <Pressable
-            onPress={manualRefresh}
+            onPress={manualRefreshAndResetSkips}
             accessibilityRole="button"
             accessibilityLabel="Retry loading battles"
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
@@ -1280,7 +1327,7 @@ export default function BattlesScreen() {
         // absolute-positioned children when they detach mid-scroll. The
         // virtualization win comes from the window props above.
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={manualRefresh} tintColor={COLORS.accent} />
+          <RefreshControl refreshing={refreshing} onRefresh={manualRefreshAndResetSkips} tintColor={COLORS.accent} />
         }
         contentContainerStyle={
           listRows.length === 0

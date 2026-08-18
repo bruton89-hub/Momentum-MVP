@@ -50,3 +50,6 @@ _to_delete/
 
 # Load-test benchmark outputs are regenerable evidence, not source
 tools/load-test/results/
+
+# Compiled pure modules used by the battle-queue tests
+.test-build/
